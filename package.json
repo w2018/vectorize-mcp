@@ -1,0 +1,45 @@
+{
+  "name": "vectorize-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "dev": "tsx src/server/main.ts",
+    "build": "tsc -p tsconfig.json && vite build",
+    "typecheck": "tsc --noEmit && npm run typecheck:web",
+    "typecheck:web": "tsc --ignoreConfig --noEmit --strict --jsx react-jsx --module esnext --moduleResolution bundler --target es2022 --lib es2022,dom --skipLibCheck src/web/vite-env.d.ts src/web/main.tsx vite.config.ts",
+    "init-admin": "tsx src/server/main.ts init-admin",
+    "bridge": "node dist/mcp/stdio.js",
+    "test": "tsx --test tmp/tests/*.test.ts",
+    "start": "node dist/server/main.js",
+    "test:browser": "tsx tmp/tests/browser-smoke.ts",
+    "format": "prettier --write src tmp/tests"
+  },
+  "dependencies": {
+    "@fastify/cookie": "11.1.5",
+    "@fastify/rate-limit": "11.2.2",
+    "@fastify/static": "10.1.9",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "better-sqlite3": "13.0.3",
+    "fastify": "5.12.8",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "sqlite-vec": "0.1.9",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "9.6.0",
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.2.1",
+    "playwright-core": "1.64.1",
+    "prettier": "3.9.10",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vite": "8.3.5"
+  }
+}
