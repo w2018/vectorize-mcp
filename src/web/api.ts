@@ -261,8 +261,15 @@ async function request<T>(
       return request<T>(path, method, body, signal, false);
     if (response.status === 401 && !path.startsWith("/auth/"))
       window.dispatchEvent(new Event("session-expired"));
+    const messages: Record<string, string> = {
+      UNAUTHENTICATED: "密码不正确，请重新输入。",
+      FORBIDDEN: "请求被安全校验拦截，请刷新页面后重试。",
+      NOT_FOUND: "接口不存在，请刷新页面。",
+      RATE_LIMITED: "尝试过于频繁，请一分钟后再试。",
+      SERVER_BUSY: "服务器繁忙，请稍后重试。",
+    };
     throw new ApiError(
-      result.error?.message || "操作未完成，请稍后重试。",
+      result.error?.message || messages[result.error?.code ?? ""] || "操作未完成，请稍后重试。",
       result.error?.code || "REQUEST_FAILED",
       response.status,
     );
