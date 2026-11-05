@@ -13,7 +13,6 @@ import {
   type BotPreset,
   type Page,
   type Preview,
-  type ServerNetwork,
   type Token,
   type WebdavStatus,
 } from "./api";
@@ -1699,7 +1698,6 @@ export function Settings({ refresh }: { refresh: number }) {
         </State>
       </section>
       <SecuritySettings />
-      <NetworkSettings />
       {pending && (
         <PreviewDialog
           title="发布配置修改"
@@ -2110,84 +2108,3 @@ function SecuritySettings() {
   );
 }
 
-function NetworkSettings() {
-  const [version, setVersion] = useState(0);
-  const net = useResource<ServerNetwork>("/server/network", version);
-  const action = useAction();
-  const [bind, setBind] = useState<"127.0.0.1" | "0.0.0.0">("127.0.0.1");
-  const [saved, setSaved] = useState(false);
-  useEffect(() => {
-    if (net.data) setBind(net.data.saved.bind_host);
-  }, [net.data]);
-  const override = net.data?.env_override;
-  const locked = Boolean(override?.host);
-  return (
-    <section className="panel padded" id="network">
-      <h2>网络访问</h2>
-      <p className="hint">
-        控制服务监听的地址。内网使用选 127.0.0.1，局域网/外网访问选 0.0.0.0；不再要求填写对外地址，也不强制 HTTPS。保存后需重启服务生效。
-      </p>
-      <State loading={net.loading} error={net.error}>
-        {net.data && (
-          <>
-            {override?.host || override?.origin ? (
-              <div className="notice warning">
-                当前由环境变量覆盖：HOST={override.host ?? "未设置"}、PUBLIC_ORIGIN=
-                {override.origin ?? "未设置"}。后台保存的设置将在清除这些环境变量并重启后生效。
-              </div>
-            ) : null}
-            <div className="notice">
-              当前运行：监听 {net.data.bind_host}，端口 {net.data.port}
-            </div>
-            <form
-              className="editor-form"
-              onSubmit={(e) => {
-                e.preventDefault();
-                void action.run(async () => {
-                  await api(
-                    "/server/network",
-                    "PUT",
-                    writeBody({ bind_host: bind }),
-                  );
-                  setSaved(true);
-                  setVersion((v) => v + 1);
-                }, "网络设置已保存");
-              }}
-            >
-              <label>
-                监听地址
-                <select
-                  aria-label="监听地址"
-                  value={bind}
-                  disabled={locked}
-                  onChange={(e) =>
-                    setBind(e.target.value as "127.0.0.1" | "0.0.0.0")
-                  }
-                >
-                  <option value="127.0.0.1">仅本机访问（127.0.0.1，最安全）</option>
-                  <option value="0.0.0.0">对外开放（0.0.0.0，需自行保障网络安全）</option>
-                </select>
-              </label>
-              {bind === "0.0.0.0" && (
-                <small className="hint">
-                  选择 0.0.0.0 后，同一局域网内的设备可直接通过本机 IP 访问。
-                </small>
-              )}
-              <footer>
-                {saved && (
-                  <span>
-                    已保存到配置文件，需重启服务生效；本机仍可用 127.0.0.1 管理，局域网设备用本机
-                    IP 访问。
-                  </span>
-                )}
-                <button className="primary" disabled={action.busy || locked}>
-                  {action.busy ? "正在保存…" : "保存网络设置"}
-                </button>
-              </footer>
-            </form>
-          </>
-        )}
-      </State>
-    </section>
-  );
-}

@@ -161,14 +161,6 @@ export interface UpdateJob {
   error?: string | null;
   started_at: number;
 }
-export interface ServerNetwork {
-  bind_host: "127.0.0.1" | "0.0.0.0";
-  port: number;
-  saved: {
-    bind_host: "127.0.0.1" | "0.0.0.0";
-  };
-  env_override: { host: string | null; origin: string | null };
-}
 export interface Config {
   revision: number;
   importanceFactor: number;

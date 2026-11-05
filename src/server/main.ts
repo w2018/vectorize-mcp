@@ -2,10 +2,8 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { hashPassword } from "./password.js";
 import { buildApp } from "./app.js";
-import { readServerSettings } from "./server-settings.js";
 const dataDir = resolve(process.env.DATA_DIR ?? "data");
 const passwordFile = join(dataDir, "admin-password.json");
-const serverSettingsFile = join(dataDir, "server-settings.json");
 await mkdir(dataDir, { recursive: true });
 if (process.argv.includes("init-admin")) {
   const password = process.env.ADMIN_PASSWORD;
@@ -27,7 +25,7 @@ if (process.argv.includes("init-admin")) {
     throw new Error(
       "Set ADMIN_PASSWORD (8–1024 characters) to reset the administrator password",
     );
-  if (password.length < 12 || password.length > 1024)
+  if (password.length < 8 || password.length > 1024)
     throw new Error("ADMIN_PASSWORD must contain 8–1024 characters");
   const tmp = passwordFile + ".tmp";
   await writeFile(tmp, JSON.stringify({ hash: hashPassword(password) }), {
@@ -45,12 +43,11 @@ if (process.argv.includes("init-admin")) {
   const port = Number(process.env.PORT ?? 3100);
   if (!Number.isInteger(port) || port < 1 || port > 65535)
     throw new Error("Invalid PORT");
-  const settings = await readServerSettings(serverSettingsFile);
-  const host = process.env.HOST ?? settings.bind_host;
+  // 监听地址仅由 HOST 环境变量控制，默认对外开放（局域网可访问）。
+  // 浏览器访问地址按请求 Host 自动判断同源，不再保存或校验对外 origin。
+  const host = process.env.HOST ?? "0.0.0.0";
   if (host !== "127.0.0.1" && host !== "0.0.0.0")
     throw new Error("HOST must be 127.0.0.1 or 0.0.0.0");
-  // 浏览器访问地址不再依赖硬编码或对外地址校验：同 Host 的请求一律视为同源。
-  // 这里只保留一个回退 origin 用于日志与 Cookie 默认值。
   const displayHost = host === "0.0.0.0" ? "127.0.0.1" : host;
   const origin = process.env.PUBLIC_ORIGIN ?? "http://" + displayHost + ":" + port;
   const { app } = await buildApp({
@@ -60,13 +57,6 @@ if (process.argv.includes("init-admin")) {
     backupDir: join(dataDir, "backups"),
     passwordFile,
     updateRoot: process.cwd(),
-    serverSettings: {
-      path: serverSettingsFile,
-      bindHost: host,
-      port,
-      originOverride: process.env.PUBLIC_ORIGIN ?? null,
-      hostOverride: process.env.HOST ?? null,
-    },
   });
   for (const signal of ["SIGINT", "SIGTERM"] as const)
     process.once(signal, () => {

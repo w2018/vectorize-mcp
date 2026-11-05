@@ -10,15 +10,6 @@ import { MemoryService } from "./service.js";
 import { registerAdmin } from "./admin.js";
 import { createMcpHandler } from "../mcp/http.js";
 import { createEmbeddingFromEnv } from "../embedding/openai.js";
-export interface ServerSettingsContext {
-  path: string;
-  bindHost: string;
-  port: number;
-  /** 环境变量 PUBLIC_ORIGIN 覆盖值（非空时后台改设置不会立即生效）。 */
-  originOverride: string | null;
-  /** 环境变量 HOST 覆盖值（非空时后台改设置不会立即生效）。 */
-  hostOverride: string | null;
-}
 export interface AppOptions {
   databasePath: string;
   passwordHash: string;
@@ -28,8 +19,6 @@ export interface AppOptions {
   embeddingEnv?: NodeJS.ProcessEnv;
   /** 管理员密码哈希文件路径；提供后才能在线修改密码。 */
   passwordFile?: string;
-  /** 监听地址设置上下文；提供后才能在线切换监听地址。 */
-  serverSettings?: ServerSettingsContext;
   /** 安装根目录；在线更新在此覆盖程序文件。默认进程工作目录。 */
   updateRoot?: string;
 }
@@ -172,7 +161,6 @@ export async function buildApp(options: AppOptions) {
       backupDir: options.backupDir,
       origin: options.origin,
       passwordFile: options.passwordFile,
-      serverSettings: options.serverSettings,
       updateRoot: options.updateRoot,
     });
     app.get("/health", async () => ({ ok: true }));

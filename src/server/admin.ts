@@ -18,11 +18,6 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { WebdavCloud } from "./webdav.js";
 import { hashPassword } from "./password.js";
-import {
-  readServerSettings,
-  writeServerSettings,
-  type BindHost,
-} from "./server-settings.js";
 import type { DatabasePool } from "./database.js";
 import { BOT_PRESETS } from "../core/catalog.js";
 import {
@@ -117,13 +112,6 @@ export async function registerAdmin(
     backupDir: string;
     origin: string;
     passwordFile?: string;
-    serverSettings?: {
-      path: string;
-      bindHost: string;
-      port: number;
-      originOverride: string | null;
-      hostOverride: string | null;
-    };
     /** 安装根目录（源码与 dist 所在），在线更新会在此目录内覆盖程序文件。 */
     updateRoot?: string;
   },
@@ -338,37 +326,6 @@ export async function registerAdmin(
     },
     { config: { rateLimit: { max: 5, timeWindow: "1 minute" } } },
   );
-  route("GET", "/server/network", async () => {
-    if (!options.serverSettings) throw new DomainError("FEATURE_DISABLED");
-    const saved = await readServerSettings(options.serverSettings.path);
-    return {
-      bind_host: options.serverSettings.bindHost,
-      port: options.serverSettings.port,
-      saved,
-      env_override: {
-        host: options.serverSettings.hostOverride,
-        origin: options.serverSettings.originOverride,
-      },
-    };
-  });
-  route("PUT", "/server/network", async (req) => {
-    if (!options.serverSettings) throw new DomainError("FEATURE_DISABLED");
-    const b = body(req);
-    const bindHost = text(b.bind_host);
-    if (bindHost !== "127.0.0.1" && bindHost !== "0.0.0.0")
-      throw new DomainError("VALIDATION_ERROR");
-    await writeServerSettings(options.serverSettings.path, {
-      bind_host: bindHost as BindHost,
-    });
-    return {
-      saved: true,
-      restart_required: true,
-      env_override: {
-        host: options.serverSettings.hostOverride,
-        origin: options.serverSettings.originOverride,
-      },
-    };
-  });
   const paged = (items: unknown[], q: RecordData) => {
     const start = offset(q.cursor),
       limit = integer(q.limit, 100, 100);

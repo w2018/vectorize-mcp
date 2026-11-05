@@ -1,6 +1,6 @@
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 export function hashPassword(password: string): string {
-  if (password.length < 12 || password.length > 1024)
+  if (password.length < 8 || password.length > 1024)
     throw new Error("Password must contain 8–1024 characters");
   const salt = randomBytes(16);
   return (
