@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { DatabasePool } from "./database.js";
 import {
   DomainError,
@@ -185,6 +185,9 @@ export class MemoryService implements McpService<Context> {
   ): Promise<unknown> {
     if (!Object.prototype.hasOwnProperty.call(toolSchemas, tool))
       throw new DomainError("VALIDATION_ERROR");
+    // 只读检索允许省略 request_id：服务端补一个，避免客户端漏传直接校验失败。
+    if (tool === "memory_search" && typeof args.request_id !== "string")
+      args = { ...args, request_id: randomUUID() };
     const parsed = toolSchemas[tool].safeParse(args);
     if (!parsed.success)
       throw new DomainError("VALIDATION_ERROR", "Invalid tool arguments");

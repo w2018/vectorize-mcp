@@ -51,7 +51,8 @@ export async function callWithRetry<T>(
   const snapshot = JSON.stringify(args);
   const safe =
     known &&
-    (internal === "memory_get" ||
+    (internal === "memory_search" ||
+      internal === "memory_get" ||
       internal === "memory_config_get" ||
       internal === "memory_bootstrap" ||
       typeof args.request_id === "string");
