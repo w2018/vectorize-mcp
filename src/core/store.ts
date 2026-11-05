@@ -2448,59 +2448,91 @@ export class Store {
     }
     if (terms.length > 60) terms.length = 60;
     const now = Date.now();
-    const ftsIds = new Set<string>();
-    if (terms.length) {
-      const expression = terms
-        .map((t) => '"' + t.replace(/"/g, '""') + '"')
-        .join(" OR ");
-      for (const row of this.rows(
-        "SELECT id FROM memory_fts WHERE memory_fts MATCH ? AND subject_id=? ORDER BY rank LIMIT 50",
-        expression,
-        ctx.subjectId,
-      ))
-        ftsIds.add(String(row.id));
+    const hayText = (m: Memory) =>
+      normalize([m.title, m.content, ...m.keywords].join(" ")).toLowerCase();
+    let candidateMemories: Memory[];
+    if (input.embedding) {
+      candidateMemories = this.all(ctx.subjectId).filter(
+        (m) =>
+          this.effective(m, now, config) &&
+          (!input.types || input.types.includes(m.type)),
+      );
+    } else {
+      // 候选集用子串匹配直接扫全量：FTS 的 top-400 截断会在「负责/项目」这类
+      // 高频词多的长查询里把真正的精确条目挤出去，导致偶发严重漏检；这里以
+      // 正确性优先。每条记忆的检索文本只归一化一次（否则 5000×60 次重复
+      // 归一化会让 900 条查询的压测从几十秒涨到几分钟）。
+      const pool = this.all(ctx.subjectId);
+      const poolHay = new Map<string, string>();
+      for (const m of pool) poolHay.set(m.id, hayText(m));
+      candidateMemories = pool.filter(
+        (m) =>
+          this.effective(m, now, config) &&
+          (!input.types || input.types.includes(m.type)) &&
+          terms.some((t) => poolHay.get(m.id)!.includes(t)),
+      );
     }
-    // 全量记忆的检索文本，用于计算词频逆文档权重（IDF），让「登录/模块」这类高频词
-    // 不再淹没「负责人/技术栈」这类真正区分的词。
-    const allMemories = this.all(ctx.subjectId);
     const hayOf = new Map(
-      allMemories.map((m) => [
+      candidateMemories.map((m) => [
         m.id,
         {
-          text: normalize([m.title, m.content, ...m.keywords].join(" ")).toLowerCase(),
+          text: hayText(m),
+          body: normalize([m.content, ...m.keywords].join(" ")).toLowerCase(),
           title: normalize(m.title ?? "").toLowerCase(),
           keywords: normalize(m.keywords.join(" ")).toLowerCase(),
         },
       ]),
     );
-    const idf = new Map<string, number>();
+    // 词频逆文档权重（IDF）：在候选集内统计词频，不用 FTS 的 df——中文会被
+    // unicode61 当成整段一个 token，2 字词在 FTS 里的 df 恒为 0，会让长句子里
+    // 的大量虚词拉低归一化分母，导致「你还记得袁勇吗，他喜欢干嘛」这类自然
+    // 提问整条检索为空。只把真正出现在库里的词计入分母。
+    const dfMap = new Map<string, number>();
     for (const term of terms) {
       let df = 0;
-      for (const hay of hayOf.values()) if (hay.text.includes(term)) df++;
-      idf.set(term, Math.log(1 + allMemories.length / (1 + df)) + 0.1);
+      for (const m of candidateMemories) {
+        const fields = hayOf.get(m.id)!;
+        if (fields.body.includes(term)) df += 1;
+      }
+      dfMap.set(term, df);
     }
-    const totalWeight = terms.reduce((sum, term) => sum + idf.get(term)!, 0);
-    const candidates = allMemories.filter(
-      (m) =>
-        this.effective(m, now, config) &&
-        (!input.types || input.types.includes(m.type)) &&
-        (!!input.embedding ||
-          ftsIds.has(m.id) ||
-          terms.some((t) => hayOf.get(m.id)!.text.includes(t))),
-    );
+    const idf = new Map<string, number>();
+    for (const term of terms)
+      idf.set(
+        term,
+        Math.log(1 + candidateMemories.length / (1 + dfMap.get(term)!)) + 0.1,
+      );
+    let totalWeight = 0;
+    for (const term of terms) if (dfMap.get(term)! > 0) totalWeight += idf.get(term)!;
+    const candidates = candidateMemories;
     let semantic = false;
     const scored: SearchItem[] = [];
+    const titleScore = new Map<string, number>();
+    const rawScore = new Map<string, number>();
     for (const m of candidates) {
       const fields = hayOf.get(m.id)!,
         // 标题与关键词命中额外加权，正文命中权重保持 1。
         matchedWeight = terms.reduce((sum, term) => {
-          if (!fields.text.includes(term)) return sum;
+          if (!fields.body.includes(term)) return sum;
           let factor = 1;
-          if (fields.title.includes(term)) factor *= 1.4;
-          if (fields.keywords.includes(term)) factor *= 1.4;
+          if (fields.title.includes(term)) factor *= 1.2;
+          if (fields.keywords.includes(term)) factor *= 1.1;
           return sum + idf.get(term)! * factor;
         }, 0),
-        lexical = totalWeight ? Math.min(1, matchedWeight / totalWeight) : 0;
+        rawLexical = totalWeight ? matchedWeight / totalWeight : 0,
+        lexical = Math.min(1, rawLexical);
+      rawScore.set(m.id, rawLexical);
+      // 标题匹配单独计分：杂糅记录会把别的事实抄进正文，正文相关度可能同样
+      // 饱和到 1，只有「标题命中」能把真正的那条记忆区分出来。
+      const matchedTitleWeight = terms.reduce(
+        (sum, term) =>
+          fields.title.includes(term) ? sum + idf.get(term)! : sum,
+        0,
+      );
+      titleScore.set(
+        m.id,
+        totalWeight ? matchedTitleWeight / totalWeight : 0,
+      );
       let relevance = lexical,
         mode: "semantic" | "lexical" = "lexical";
       if (input.embedding) {
@@ -2568,7 +2600,10 @@ export class Store {
     }
     // 综合排序：相关度优先（0.7），重要度/频次/时间权重为辅（0.3）；
     // 相关度相同时再比权重与更新时间，保证「重要但不相关」不会压过精确命中。
-    const rank = (m: SearchItem) => 0.7 * m.relevance + 0.3 * m.weight;
+    const rank = (m: SearchItem) =>
+      0.75 * (rawScore.get(m.id) ?? 0) +
+      0.1 * (titleScore.get(m.id) ?? 0) +
+      0.15 * m.weight;
     scored.sort(
       (a, b) =>
         rank(b) - rank(a) ||
