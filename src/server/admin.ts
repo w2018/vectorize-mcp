@@ -812,11 +812,46 @@ export async function registerAdmin(
       return cloudError(error);
     }
   });
-  route("POST", "/webdav/delete", async (req) => {
+  const cloudDeletions = new Map<
+    string,
+    { code: string; session: string; expires: number; attempts: number }
+  >();
+  route("POST", "/webdav/delete-preview", async (req) => {
     const name = text(body(req).name);
     if (!safeName(name)) throw new DomainError("VALIDATION_ERROR");
+    const code = String(randomInt(0, 1000000)).padStart(6, "0");
+    const expires = Date.now() + 300000;
+    cloudDeletions.set(name, {
+      code,
+      session: current(req)!.id,
+      expires,
+      attempts: 0,
+    });
+    return { name, code, expires_at: expires };
+  });
+  route("POST", "/webdav/delete", async (req) => {
+    const b = body(req);
+    const name = text(b.name);
+    if (!safeName(name)) throw new DomainError("VALIDATION_ERROR");
+    const input = text(b.code);
+    const entry = cloudDeletions.get(name);
+    if (
+      !entry ||
+      entry.session !== current(req)!.id ||
+      entry.expires < Date.now() ||
+      entry.attempts >= 5
+    ) {
+      cloudDeletions.delete(name);
+      throw new DomainError("PREVIEW_EXPIRED", "验证码已失效，请重新获取");
+    }
+    entry.attempts++;
+    const given = Buffer.from(input);
+    const expected = Buffer.from(entry.code);
+    if (given.length !== expected.length || !timingSafeEqual(given, expected))
+      throw new DomainError("FORBIDDEN", "验证码不正确");
     try {
       await cloud.remove(name);
+      cloudDeletions.delete(name);
       return { deleted: true, name };
     } catch (error) {
       return cloudError(error);
