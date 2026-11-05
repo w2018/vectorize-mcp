@@ -366,12 +366,8 @@ export async function registerAdmin(
         : text(rawOrigin);
     if (publicOrigin !== null && !validOrigin(publicOrigin))
       throw new DomainError("VALIDATION_ERROR");
-    if (bindHost === "0.0.0.0") {
-      if (!publicOrigin)
-        throw new DomainError("VALIDATION_ERROR");
-      if (!publicOrigin.startsWith("https:") && !isLoopbackOrigin(publicOrigin))
-        throw new DomainError("VALIDATION_ERROR");
-    }
+    if (bindHost === "0.0.0.0" && !publicOrigin)
+      throw new DomainError("VALIDATION_ERROR");
     await writeServerSettings(options.serverSettings.path, {
       bind_host: bindHost as BindHost,
       public_origin: publicOrigin,

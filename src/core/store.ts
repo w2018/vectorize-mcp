@@ -2420,8 +2420,27 @@ export class Store {
     const queryParts: string[] = [...(input.keywords ?? [])];
     for (const piece of input.query.split(/[^\p{L}\p{N}]+/u))
       if (piece) queryParts.push(piece);
+    // 少量口语同义词扩展：把「为什么/原因/坑/没做/进展」等意图词映射到记忆里
+    // 常用的书面说法，弥补纯字面匹配对自然提问不友好的问题。
+    const SYNONYMS: Record<string, string[]> = {
+      原因: ["因为"],
+      为什么: ["因为"],
+      坑: ["经验", "避免"],
+      教训: ["经验"],
+      没做: ["待办"],
+      未完成: ["待办"],
+      进展: ["阶段"],
+      进度: ["阶段"],
+      选型: ["采用"],
+      岗位: ["负责"],
+      职业: ["负责"],
+      喜欢: ["偏好"],
+      不喜欢: ["避免"],
+    };
     for (const part of queryParts) {
       addTerm(part);
+      for (const [needle, extras] of Object.entries(SYNONYMS))
+        if (part.includes(needle)) for (const extra of extras) addTerm(extra);
       const chars = [...part];
       if (chars.length >= 2 && /[\u4e00-\u9fff]/.test(part))
         for (let i = 0; i < chars.length - 1; i++)
@@ -2441,26 +2460,47 @@ export class Store {
       ))
         ftsIds.add(String(row.id));
     }
-    const candidates = this.all(ctx.subjectId).filter(
+    // 全量记忆的检索文本，用于计算词频逆文档权重（IDF），让「登录/模块」这类高频词
+    // 不再淹没「负责人/技术栈」这类真正区分的词。
+    const allMemories = this.all(ctx.subjectId);
+    const hayOf = new Map(
+      allMemories.map((m) => [
+        m.id,
+        {
+          text: normalize([m.title, m.content, ...m.keywords].join(" ")).toLowerCase(),
+          title: normalize(m.title ?? "").toLowerCase(),
+          keywords: normalize(m.keywords.join(" ")).toLowerCase(),
+        },
+      ]),
+    );
+    const idf = new Map<string, number>();
+    for (const term of terms) {
+      let df = 0;
+      for (const hay of hayOf.values()) if (hay.text.includes(term)) df++;
+      idf.set(term, Math.log(1 + allMemories.length / (1 + df)) + 0.1);
+    }
+    const totalWeight = terms.reduce((sum, term) => sum + idf.get(term)!, 0);
+    const candidates = allMemories.filter(
       (m) =>
         this.effective(m, now, config) &&
         (!input.types || input.types.includes(m.type)) &&
         (!!input.embedding ||
           ftsIds.has(m.id) ||
-          terms.some((t) =>
-            normalize([m.title, m.content, ...m.keywords].join(" "))
-              .toLowerCase()
-              .includes(t),
-          )),
+          terms.some((t) => hayOf.get(m.id)!.text.includes(t))),
     );
     let semantic = false;
     const scored: SearchItem[] = [];
     for (const m of candidates) {
-      const hay = normalize(
-          [m.content, m.title, ...m.keywords].join(" "),
-        ).toLowerCase(),
-        matched = terms.filter((t) => hay.includes(t)).length,
-        lexical = terms.length ? matched / terms.length : 0;
+      const fields = hayOf.get(m.id)!,
+        // 标题与关键词命中额外加权，正文命中权重保持 1。
+        matchedWeight = terms.reduce((sum, term) => {
+          if (!fields.text.includes(term)) return sum;
+          let factor = 1;
+          if (fields.title.includes(term)) factor *= 1.4;
+          if (fields.keywords.includes(term)) factor *= 1.4;
+          return sum + idf.get(term)! * factor;
+        }, 0),
+        lexical = totalWeight ? Math.min(1, matchedWeight / totalWeight) : 0;
       let relevance = lexical,
         mode: "semantic" | "lexical" = "lexical";
       if (input.embedding) {
@@ -2526,8 +2566,12 @@ export class Store {
         }
       }
     }
+    // 综合排序：相关度优先（0.7），重要度/频次/时间权重为辅（0.3）；
+    // 相关度相同时再比权重与更新时间，保证「重要但不相关」不会压过精确命中。
+    const rank = (m: SearchItem) => 0.7 * m.relevance + 0.3 * m.weight;
     scored.sort(
       (a, b) =>
+        rank(b) - rank(a) ||
         b.weight - a.weight ||
         b.relevance - a.relevance ||
         b.updated_at - a.updated_at ||

@@ -63,14 +63,7 @@ if (process.argv.includes("init-admin")) {
     );
   if (host === "0.0.0.0" && !isLoopbackOrigin(origin))
     throw new Error(
-      "监听 0.0.0.0 对外开放时，PUBLIC_ORIGIN 必须填浏览器实际访问的地址；公网访问请使用 HTTPS 反向代理",
-    );
-  if (
-    !origin.startsWith("https:") &&
-    !isLoopbackOrigin(origin)
-  )
-    throw new Error(
-      "Remote access requires HTTPS PUBLIC_ORIGIN behind a TLS reverse proxy",
+      "监听 0.0.0.0 对外开放时，PUBLIC_ORIGIN 必须填浏览器实际访问的地址（支持 HTTP，公网建议使用 HTTPS 反向代理）",
     );
   const { app } = await buildApp({
     databasePath: join(dataDir, "memory.sqlite"),

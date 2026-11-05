@@ -2128,7 +2128,7 @@ function NetworkSettings() {
     <section className="panel padded" id="network">
       <h2>网络访问</h2>
       <p className="hint">
-        控制服务监听的地址。默认仅本机可访问；对外开放时请同时填写浏览器实际访问的完整地址，公网访问务必使用 HTTPS 反向代理。保存后需重启服务生效。
+        控制服务监听的地址。默认仅本机可访问；对外开放时请同时填写浏览器实际访问的完整地址，默认使用 HTTP，公网访问建议套一层 HTTPS 反向代理。保存后需重启服务生效。
       </p>
       <State loading={net.loading} error={net.error}>
         {net.data && (
@@ -2172,7 +2172,7 @@ function NetworkSettings() {
                   }
                 >
                   <option value="127.0.0.1">仅本机访问（127.0.0.1，最安全）</option>
-                  <option value="0.0.0.0">对外开放（0.0.0.0，需自行保障网络与 HTTPS 安全）</option>
+                  <option value="0.0.0.0">对外开放（0.0.0.0，需自行保障网络安全）</option>
                 </select>
               </label>
               <label>
@@ -2187,7 +2187,7 @@ function NetworkSettings() {
               </label>
               {bind === "0.0.0.0" && (
                 <small className="hint">
-                  选择对外开放时必须填写对外访问地址；公网访问请使用 HTTPS（反向代理）。
+                  选择对外开放时必须填写对外访问地址（默认支持 HTTP）。
                 </small>
               )}
               <footer>
