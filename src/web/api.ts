@@ -192,11 +192,38 @@ export class ApiError extends Error {
     super(message);
   }
 }
+async function refreshCsrf(): Promise<boolean> {
+  try {
+    const response = await fetch("/api/v1/auth/session", {
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    });
+    const result = (await response.json()) as {
+      data?: { csrf_token?: string };
+    };
+    const token = result.data?.csrf_token;
+    if (!response.ok || !token) return false;
+    csrf = token;
+    return true;
+  } catch {
+    return false;
+  }
+}
 export async function api<T>(
   path: string,
   method = "GET",
   body?: unknown,
   signal?: AbortSignal,
+): Promise<T> {
+  return request<T>(path, method, body, signal, true);
+}
+async function request<T>(
+  path: string,
+  method: string,
+  body: unknown,
+  signal: AbortSignal | undefined,
+  retry: boolean,
 ): Promise<T> {
   const headers: Record<string, string> = { Accept: "application/json" };
   if (body !== undefined) headers["Content-Type"] = "application/json";
@@ -224,6 +251,14 @@ export async function api<T>(
     );
   }
   if (!response.ok || result.ok === false) {
+    if (
+      retry &&
+      response.status === 403 &&
+      result.error?.code === "FORBIDDEN" &&
+      path !== "/auth/session" &&
+      (await refreshCsrf())
+    )
+      return request<T>(path, method, body, signal, false);
     if (response.status === 401 && !path.startsWith("/auth/"))
       window.dispatchEvent(new Event("session-expired"));
     throw new ApiError(
