@@ -5,8 +5,56 @@ export type MemoryType =
   | "project"
   | "decision"
   | "lesson"
-  | "task";
-export type LinkType = "related_to" | "supports" | "contradicts" | "supersedes";
+  | "task"
+  | "person"
+  | "concept"
+  | "persona";
+export type LinkType = string;
+export type AccountKind = "standard" | "qqbot";
+export interface BotSettings {
+  bot_name: string;
+  identity: string;
+  personality: string;
+  tone: string;
+  language: string;
+  answer_length: string;
+  emoji_level: string;
+  proactivity: string;
+  allow_rules: string[];
+  deny_rules: string[];
+  sensitive_topics: string[];
+  refusal_message: string;
+  privacy_rules: string[];
+  tool_rules: string[];
+  group_policy: string;
+  private_policy: string;
+  search_types: MemoryType[];
+  token_budget: number;
+}
+export interface BotProfile {
+  subject_id: string;
+  kind: "qqbot";
+  revision: number;
+  preset_id: string | null;
+  persona_memory_id: string | null;
+  settings: BotSettings;
+  created_at: number;
+  updated_at: number;
+}
+export interface BotPreset {
+  id: string;
+  name: string;
+  description: string;
+  settings: BotSettings;
+  persona: {
+    title: string;
+    content: string;
+    keywords: string[];
+    importance: number;
+  };
+  examples: MemoryFields[];
+}
+
 export interface Context {
   subjectId: string;
   tokenId: string;
@@ -202,6 +250,7 @@ export interface TokenInfo {
   revoked_at: number | null;
 }
 export interface TokenResult extends TokenInfo {
+  kind: AccountKind;
   token?: string;
   secret_available: boolean;
   default_space_id: string;

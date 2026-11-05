@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Graph3D } from "./graph3d";
 import {
   api,
   query,
   writeBody,
+  type AccountKind,
   type Graph,
   type AccountStats,
   type Link,
@@ -13,6 +14,7 @@ import {
   type Space,
 } from "./api";
 import {
+  ConfirmDialog,
   date,
   Feedback,
   Heading,
@@ -23,31 +25,48 @@ import {
   useAction,
   useResource,
 } from "./ui";
-const colors: Record<string, string> = {
-  fact: "#378e80",
-  preference: "#b0854d",
-  profile: "#8b73b7",
-  project: "#578cc3",
-  decision: "#d17d63",
-  lesson: "#a39744",
-  task: "#689a8b",
-};
+import { MEMORY_CATALOG, QQBOT_LINK_CATALOG } from "../core/catalog";
+const colors = Object.fromEntries(
+  MEMORY_CATALOG.map((item) => [item.key, item.color]),
+) as Record<string, string>;
+const linkLabels = Object.fromEntries(
+  QQBOT_LINK_CATALOG.map((item) => [item.key, item.label]),
+) as Record<string, string>;
+const nodeName = (n: Memory | undefined) =>
+  n ? n.title || n.content.slice(0, 45) : "关联记忆";
 export function GraphView({
   subject,
   refresh,
+  kind = "standard",
 }: {
   subject: string;
   refresh: number;
+  kind?: AccountKind;
 }) {
   const [version, setVersion] = useState(0);
   const [space, setSpace] = useState("");
   const [type, setType] = useState("");
-  const [focus, setFocus] = useState("");
+  const [search, setSearch] = useState("");
+  const [timePoint, setTimePoint] = useState<number | null>(null);
   const [selected, setSelected] = useState<Memory | null>(null);
   const [list, setList] = useState(false);
   const [relation, setRelation] = useState(false);
   const [editingLink, setEditingLink] = useState<Link | null>(null);
+  const [removingLink, setRemovingLink] = useState<Link | null>(null);
+  const [fallbackReason, setFallbackReason] = useState("");
   const action = useAction();
+  useEffect(() => {
+    setVersion(0);
+    setSpace("");
+    setType("");
+    setSearch("");
+    setTimePoint(null);
+    setSelected(null);
+    setRelation(false);
+    setEditingLink(null);
+    setRemovingLink(null);
+    setFallbackReason("");
+  }, [subject, kind]);
   const spaces = useResource<Page<Space>>(
     "/spaces" + query({ subject_id: subject }),
     refresh,
@@ -58,184 +77,341 @@ export function GraphView({
         subject_id: subject,
         space_id: space,
         type,
-        focus_id: focus,
-        node_limit: 200,
+        node_limit: 500,
         edge_limit: 500,
       }),
     refresh + version,
   );
-  const nodes = graph.data?.nodes || [];
-  const edges = graph.data?.edges || [];
+  const allNodes = useMemo(() => graph.data?.nodes || [], [graph.data]);
+  const allEdges = useMemo(() => graph.data?.edges || [], [graph.data]);
+  const bounds = useMemo(() => {
+    if (!allNodes.length) return null;
+    let min = Infinity,
+      max = -Infinity;
+    for (const n of allNodes) {
+      min = Math.min(min, n.created_at);
+      max = Math.max(max, n.created_at);
+    }
+    return { min, max };
+  }, [allNodes]);
+  const effectiveTime = timePoint ?? bounds?.max ?? null;
+  const nodes = useMemo(
+    () =>
+      effectiveTime == null
+        ? allNodes
+        : allNodes.filter((n) => n.created_at <= effectiveTime),
+    [allNodes, effectiveTime],
+  );
+  const edges = useMemo(() => {
+    const ids = new Set(nodes.map((n) => n.id));
+    return allEdges.filter(
+      (e) =>
+        (effectiveTime == null ||
+          !e.created_at ||
+          e.created_at <= effectiveTime) &&
+        ids.has(e.source_id) &&
+        ids.has(e.target_id),
+    );
+  }, [allEdges, nodes, effectiveTime]);
+  const results = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    if (!term) return [];
+    return nodes
+      .filter(
+        (n) =>
+          (n.title || "").toLowerCase().includes(term) ||
+          n.content.toLowerCase().includes(term) ||
+          n.keywords.some((k) => k.toLowerCase().includes(term)),
+      )
+      .slice(0, 20);
+  }, [nodes, search]);
+  const visible =
+    selected && nodes.some((n) => n.id === selected.id) ? selected : null;
+  const visibleEdges = useMemo(
+    () =>
+      visible
+        ? edges.filter(
+            (e) => e.source_id === visible.id || e.target_id === visible.id,
+          )
+        : [],
+    [edges, visible],
+  );
+  const typeOptions = MEMORY_CATALOG.filter((item) =>
+    item.kinds.includes(kind),
+  );
   return (
     <>
       <Heading
-        eyebrow="CONNECTED MEMORIES"
+        eyebrow="MEMORY GALAXY"
         title="记忆星图"
-        description="每一个点是一条记忆，连线表示明确记录的关系。点的大小来自服务端权重。"
+        description="拖动时间轴回看记忆网络的生长；搜索或点击节点，镜头会飞向它并展示关系链。"
       >
         <button disabled={!nodes.length} onClick={() => setRelation(true)}>
           ＋ 添加关系
         </button>
       </Heading>
       <Feedback error={action.error || spaces.error} notice={action.notice} />
-      <section className="panel">
-        <div className="filters">
-          <select
-            aria-label="空间"
-            value={space}
-            onChange={(e) => setSpace(e.target.value)}
-          >
-            <option value="">全部空间</option>
-            {spaces.data?.items.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
-          <select
-            aria-label="类型"
-            value={type}
-            onChange={(e) => setType(e.target.value)}
-          >
-            <option value="">全部类型</option>
-            {Object.entries(types).map(([k, v]) => (
-              <option key={k} value={k}>
-                {v}
-              </option>
-            ))}
-          </select>
-          <button onClick={() => setList(!list)}>
-            {list ? "切换星图" : "文字列表"}
-          </button>
-          {focus && <button onClick={() => setFocus("")}>返回完整范围</button>}
+      {fallbackReason && !list && (
+        <div className="notice warning">
+          {fallbackReason} 已切换为文字列表，记忆管理不受影响。
         </div>
-        {graph.data?.truncated && (
-          <div className="notice warning">
-            只显示部分关系（最多 200 个点、500
-            条边）。缩小空间或类型范围可看得更清楚。
-          </div>
-        )}
-        <State
-          loading={graph.loading}
-          error={graph.error}
-          empty={!nodes.length}
-        >
-          {list ? (
-            <div className="padded">
-              {nodes.map((n) => (
-                <div className="list-row" key={n.id}>
-                  <button
-                    className="text-button"
-                    onClick={() => setSelected(n)}
-                  >
-                    {n.title || n.content.slice(0, 60)}
-                  </button>
-                  <span>
-                    {types[n.type]} · 权重 {n.weight}
-                  </span>
-                </div>
-              ))}
+      )}
+      {graph.data?.truncated && (
+        <div className="notice warning">
+          只显示部分关系（最多 500 个点、500
+          条边）。缩小空间或类型范围可看得更清楚。
+        </div>
+      )}
+      <State
+        loading={graph.loading}
+        error={graph.error}
+        empty={!allNodes.length}
+      >
+        {list || fallbackReason ? (
+          <section className="panel padded">
+            <div className="filters">
+              <button
+                onClick={() => {
+                  setFallbackReason("");
+                  setList(false);
+                }}
+              >
+                重试星图
+              </button>
             </div>
-          ) : (
-            <Graph3D
-              nodes={nodes}
-              edges={edges}
-              colors={colors}
-              onSelect={setSelected}
-            />
-          )}
-          <p className="graph-help">
-            拖拽旋转 · 滚轮缩放 · 悬停高亮 ·
-            点击查看；键盘方向键旋转、空格暂停。系统减少动态效果时停止自动旋转。
-          </p>
-          <div className="legend">
-            {Object.entries(types).map(([k, v]) => (
-              <span key={k}>
-                <i style={{ background: colors[k] }} />
-                {v}
-              </span>
-            ))}
-          </div>
-        </State>
-      </section>
-      {selected && (
-        <Modal
-          title={selected.title || "记忆详情"}
-          onClose={() => setSelected(null)}
-        >
-          <p className="full-content">{selected.content}</p>
-          <p>
-            权重 {selected.weight} · 找到 {selected.retrieval_count} 次
-          </p>
-          <h3>可见关系</h3>
-          {edges
-            .filter(
-              (e) => e.source_id === selected.id || e.target_id === selected.id,
-            )
-            .map((e) => (
-              <div className="list-row" key={e.id}>
-                <div>
-                  <strong>
-                    {nodes.find(
-                      (n) =>
-                        n.id ===
-                        (e.source_id === selected.id
-                          ? e.target_id
-                          : e.source_id),
-                    )?.title || "关联记忆"}
-                  </strong>
-                  <small>
-                    {e.type} · 强度 {e.strength}
-                  </small>
-                </div>
-                <button
-                  disabled={action.busy}
-                  onClick={() => {
-                    setSelected(null);
-                    setEditingLink(e);
-                  }}
-                >
-                  编辑强度
+            {nodes.map((n) => (
+              <div className="list-row" key={n.id}>
+                <button className="text-button" onClick={() => setSelected(n)}>
+                  {n.title || n.content.slice(0, 60)}
                 </button>
-                <button
-                  className="danger-outline"
-                  disabled={action.busy}
-                  onClick={() => {
-                    if (window.confirm("删除这条关系？记忆正文不会删除。"))
-                      void action.run(async () => {
-                        await api(
-                          "/links",
-                          "POST",
-                          writeBody({
-                            subject_id: subject,
-                            action: "remove",
-                            source_id: e.source_id,
-                            target_id: e.target_id,
-                            type: e.type,
-                            expected_revision: e.revision,
-                          }),
-                        );
-                        setVersion((v) => v + 1);
-                        setSelected(null);
-                      }, "关系已删除");
-                  }}
-                >
-                  移除
-                </button>
+                <span>
+                  {types[n.type]} · 权重 {n.weight} · {date(n.created_at)}
+                </span>
               </div>
             ))}
-          <footer>
-            <button
-              onClick={() => {
-                setFocus(selected.id);
-                setSelected(null);
-              }}
-            >
-              查看附近关系
-            </button>
-            <button onClick={() => setSelected(null)}>关闭</button>
-          </footer>
-        </Modal>
+          </section>
+        ) : (
+          <div className="graph-shell">
+            <aside className="graph-side" aria-label="星图控制台">
+              <label>
+                搜索节点
+                <input
+                  aria-label="搜索节点"
+                  value={search}
+                  placeholder="名称、内容或关键词"
+                  onChange={(e) => setSearch(e.target.value)}
+                />
+              </label>
+              {search.trim() && (
+                <div className="graph-results">
+                  {results.length ? (
+                    results.map((n) => (
+                      <button
+                        className="text-button"
+                        key={n.id}
+                        onClick={() => setSelected(n)}
+                      >
+                        {n.title || n.content.slice(0, 40)}
+                        <small>{types[n.type]}</small>
+                      </button>
+                    ))
+                  ) : (
+                    <small>没有匹配的节点</small>
+                  )}
+                </div>
+              )}
+              <label>
+                空间
+                <select
+                  aria-label="空间"
+                  value={space}
+                  onChange={(e) => setSpace(e.target.value)}
+                >
+                  <option value="">全部空间</option>
+                  {spaces.data?.items.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                类型
+                <select
+                  aria-label="类型"
+                  value={type}
+                  onChange={(e) => setType(e.target.value)}
+                >
+                  <option value="">全部类型</option>
+                  {typeOptions.map((item) => (
+                    <option key={item.key} value={item.key}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {bounds && (
+                <fieldset className="graph-timeline">
+                  <legend>时间轴回溯</legend>
+                  <input
+                    type="range"
+                    aria-label="时间轴"
+                    min={bounds.min}
+                    max={bounds.max}
+                    value={effectiveTime ?? bounds.max}
+                    onChange={(e) => setTimePoint(Number(e.target.value))}
+                  />
+                  <small>
+                    {date(effectiveTime)} · 可见 {nodes.length} 点 /{" "}
+                    {edges.length} 条关系
+                  </small>
+                  <button
+                    type="button"
+                    disabled={timePoint == null}
+                    onClick={() => setTimePoint(null)}
+                  >
+                    回到最新
+                  </button>
+                </fieldset>
+              )}
+              <div className="legend">
+                {typeOptions.map((item) => (
+                  <span key={item.key}>
+                    <i style={{ background: colors[item.key] }} />
+                    {item.label}
+                  </span>
+                ))}
+              </div>
+              <button onClick={() => setList(true)}>文字列表</button>
+              <p className="graph-help">
+                拖拽旋转 · 滚轮缩放 · 悬停高亮 ·
+                点击飞行；键盘方向键旋转、空格暂停自动环绕。
+              </p>
+            </aside>
+            <div className="graph-stage">
+              {nodes.length ? (
+                <Graph3D
+                  nodes={nodes}
+                  edges={edges}
+                  colors={colors}
+                  selectedId={visible?.id ?? null}
+                  onSelect={setSelected}
+                  onFailure={(message) => setFallbackReason(message)}
+                />
+              ) : (
+                <div className="notice">
+                  该时间点尚无记忆。向右拖动时间轴或点击“回到最新”。
+                </div>
+              )}
+              {visible && (
+                <aside className="graph-detail" aria-label="节点详情与关系链">
+                  <header>
+                    <strong>{visible.title || "记忆详情"}</strong>
+                    <button
+                      aria-label="关闭详情"
+                      onClick={() => setSelected(null)}
+                    >
+                      ✕
+                    </button>
+                  </header>
+                  <p className="full-content">{visible.content}</p>
+                  <small>
+                    {types[visible.type]} · 权重 {visible.weight} · 找到{" "}
+                    {visible.retrieval_count} 次 · {date(visible.created_at)}
+                  </small>
+                  <h3>关系链</h3>
+                  {visibleEdges.length === 0 && (
+                    <small>当前时间点没有可见关系。</small>
+                  )}
+                  {visibleEdges.map((e) => {
+                    const outgoing = e.source_id === visible.id;
+                    const other = nodes.find(
+                      (n) =>
+                        n.id === (outgoing ? e.target_id : e.source_id),
+                    );
+                    return (
+                      <div className="relation-chain" key={e.id}>
+                        <div className="relation-path">
+                          {outgoing ? (
+                            <>
+                              <span className="relation-node current">
+                                {nodeName(visible)}
+                              </span>
+                              <span className="relation-arrow">
+                                --[{linkLabels[e.type] || e.type}]--&gt;
+                              </span>
+                              <button
+                                className="text-button relation-node"
+                                onClick={() => other && setSelected(other)}
+                              >
+                                {nodeName(other)}
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <button
+                                className="text-button relation-node"
+                                onClick={() => other && setSelected(other)}
+                              >
+                                {nodeName(other)}
+                              </button>
+                              <span className="relation-arrow">
+                                --[{linkLabels[e.type] || e.type}]--&gt;
+                              </span>
+                              <span className="relation-node current">
+                                {nodeName(visible)}
+                              </span>
+                            </>
+                          )}
+                        </div>
+                        <small>强度 {e.strength}</small>
+                        <div className="toolbar">
+                          <button
+                            disabled={action.busy}
+                            onClick={() => setEditingLink(e)}
+                          >
+                            编辑强度
+                          </button>
+                          <button
+                            className="danger-outline"
+                            disabled={action.busy}
+                            onClick={() => setRemovingLink(e)}
+                          >
+                            移除
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </aside>
+              )}
+            </div>
+          </div>
+        )}
+      </State>
+      {removingLink && (
+        <ConfirmDialog
+          title="删除这条关系？"
+          onClose={() => setRemovingLink(null)}
+          onConfirm={async () => {
+            await api(
+              "/links",
+              "POST",
+              writeBody({
+                subject_id: subject,
+                action: "remove",
+                source_id: removingLink.source_id,
+                target_id: removingLink.target_id,
+                type: removingLink.type,
+                expected_revision: removingLink.revision,
+              }),
+            );
+            setVersion((v) => v + 1);
+            setRemovingLink(null);
+          }}
+        >
+          记忆正文不会删除，只移除这条关联。
+        </ConfirmDialog>
       )}
       {editingLink && (
         <Modal
@@ -269,7 +445,7 @@ export function GraphView({
           >
             <Feedback error={action.error} notice="" />
             <p>
-              关系类型：{editingLink.type} · 当前版本：{editingLink.revision}
+              关系类型：{linkLabels[editingLink.type] || editingLink.type} · 当前版本：{editingLink.revision}
             </p>
             <label>
               关系强度（0～1）
@@ -341,13 +517,33 @@ export function GraphView({
             ))}
             <label>
               关系类型
-              <select name="type">
-                {["related_to", "supports", "contradicts", "supersedes"].map(
-                  (t) => (
-                    <option key={t}>{t}</option>
-                  ),
-                )}
-              </select>
+              {kind === "qqbot" ? (
+                <>
+                  <input
+                    name="type"
+                    list="qqbot-link-types"
+                    required
+                    maxLength={32}
+                    placeholder="选择或输入自定义关系"
+                    defaultValue="related_to"
+                  />
+                  <datalist id="qqbot-link-types">
+                    {QQBOT_LINK_CATALOG.map((item) => (
+                      <option key={item.key} value={item.key}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </datalist>
+                </>
+              ) : (
+                <select name="type">
+                  {QQBOT_LINK_CATALOG.slice(0, 4).map((item) => (
+                    <option key={item.key} value={item.key}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
+              )}
             </label>
             <label>
               关系强度（0～1）
@@ -394,9 +590,11 @@ interface Statistics {
 export function Stats({
   subject,
   refresh,
+  onSelectAccount,
 }: {
   subject: string;
   refresh: number;
+  onSelectAccount?: (id: string) => void;
 }) {
   const [days, setDays] = useState("30");
   const data = useResource<Statistics>(
@@ -452,49 +650,6 @@ export function Stats({
           <option value="90">最近 90 天</option>
         </select>
       </Heading>
-      <section className="panel padded">
-        <h2>按账户统计</h2>
-        <State
-          loading={accountStats.loading}
-          error={accountStats.error}
-          empty={!accountStats.data?.items.length}
-        >
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>账户</th>
-                  <th>记忆总数</th>
-                  <th>内容 token</th>
-                  <th>检索请求</th>
-                  <th>提取 token</th>
-                  <th>有效命中率</th>
-                  <th>活跃 / 归档 / 合并</th>
-                </tr>
-              </thead>
-              <tbody>
-                {accountStats.data?.items.map((a) => (
-                  <tr key={a.subject_id}>
-                    <td>{a.label}</td>
-                    <td>{a.memory_total}</td>
-                    <td>{a.memory_total_tokens}</td>
-                    <td>{a.search_requests}</td>
-                    <td>{a.extraction_total_tokens}</td>
-                    <td>
-                      {a.hit_effective_rate == null
-                        ? "—"
-                        : (a.hit_effective_rate * 100).toFixed(1) + "%"}
-                    </td>
-                    <td>
-                      {a.active} / {a.archived} / {a.merged}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </State>
-      </section>
       <State loading={data.loading} error={data.error}>
         <div className="metric-grid">
           {metrics.map(([label, value]) => (
@@ -520,6 +675,60 @@ export function Stats({
           <small>统计时点：{date(d?.as_of)}</small>
         </section>
       </State>
+      <section className="panel padded">
+        <h2>按账户统计</h2>
+        <State
+          loading={accountStats.loading}
+          error={accountStats.error}
+          empty={!accountStats.data?.items.length}
+        >
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>账户</th>
+                  <th>记忆总数</th>
+                  <th>内容 token</th>
+                  <th>检索请求</th>
+                  <th>提取 token</th>
+                  <th>有效命中率</th>
+                  <th>活跃 / 归档 / 合并</th>
+                </tr>
+              </thead>
+              <tbody>
+                {accountStats.data?.items.map((a) => (
+                  <tr key={a.subject_id}>
+                    <td>
+                      {onSelectAccount ? (
+                        <button
+                          className="text-button"
+                          onClick={() => onSelectAccount(a.subject_id)}
+                        >
+                          {a.label}
+                        </button>
+                      ) : (
+                        a.label
+                      )}
+                    </td>
+                    <td>{a.memory_total}</td>
+                    <td>{a.memory_total_tokens}</td>
+                    <td>{a.search_requests}</td>
+                    <td>{a.extraction_total_tokens}</td>
+                    <td>
+                      {a.hit_effective_rate == null
+                        ? "—"
+                        : (a.hit_effective_rate * 100).toFixed(1) + "%"}
+                    </td>
+                    <td>
+                      {a.active} / {a.archived} / {a.merged}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </State>
+      </section>
     </>
   );
 }

@@ -8,6 +8,7 @@ import { randomBytes, randomUUID, scrypt, timingSafeEqual } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { DatabasePool } from "./database.js";
+import { BOT_PRESETS } from "../core/catalog.js";
 import {
   DomainError,
   type Context,
@@ -314,7 +315,20 @@ export async function registerAdmin(
       "createToken",
       text(b.label),
       b.subject_id === undefined ? undefined : subject(b),
-      { request_id: text(b.request_id), preview_token: b.preview_token },
+      {
+        request_id: text(b.request_id),
+        preview_token: b.preview_token,
+        kind:
+          b.kind === undefined
+            ? undefined
+            : (() => {
+                if (b.kind !== "standard" && b.kind !== "qqbot")
+                  throw new DomainError("VALIDATION_ERROR");
+                return b.kind;
+              })(),
+        preset_id:
+          b.preset_id === undefined ? undefined : text(b.preset_id),
+      },
     );
   });
   route("POST", "/tokens/:id/revoke-preview", async (req) =>
@@ -332,6 +346,43 @@ export async function registerAdmin(
   route("POST", "/accounts/:id/enable-preview", async (req) =>
     write("enablePreview", param(req)),
   );
+  route("GET", "/qqbot/presets", async () => ({ items: BOT_PRESETS }));
+  route("GET", "/qqbot", async (req) =>
+    read("botProfile", subject(query(req))),
+  );
+  route("PUT", "/qqbot", async (req) => {
+    const b = body(req);
+    return write(
+      "updateBotProfile",
+      subject(b),
+      object(b.patch),
+      integer(b.expected_revision, 0, Number.MAX_SAFE_INTEGER),
+      text(b.reason),
+    );
+  });
+  route("POST", "/qqbot/apply-preset", async (req) => {
+    const b = body(req);
+    if (b.write_examples !== undefined && typeof b.write_examples !== "boolean")
+      throw new DomainError("VALIDATION_ERROR");
+    return write(
+      "applyBotPreset",
+      subject(b),
+      text(b.preset_id),
+      integer(b.expected_revision, 0, Number.MAX_SAFE_INTEGER),
+      b.write_examples === true,
+      text(b.reason),
+    );
+  });
+  route("GET", "/qqbot/bootstrap", async (req) => {
+    const q = query(req);
+    return read(
+      "bootstrap",
+      subject(q),
+      q.token_budget === undefined
+        ? undefined
+        : integer(q.token_budget, 600, 1200),
+    );
+  });
   route("GET", "/spaces", async (req) => ({
     items: await read("spaces", subject(query(req))),
   }));
@@ -422,7 +473,7 @@ export async function registerAdmin(
       space_id: q.space_id || undefined,
       type: q.type || undefined,
       focus_id: q.focus_id || undefined,
-      node_limit: integer(q.node_limit, 200, 200),
+      node_limit: integer(q.node_limit, 500, 500),
       edge_limit: integer(q.edge_limit, 500, 500),
     });
   });

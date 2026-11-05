@@ -54,14 +54,8 @@ export interface AccountStats {
 export function dataChanged() {
   window.dispatchEvent(new Event("memory-data-changed"));
 }
-export type MemoryType =
-  | "fact"
-  | "preference"
-  | "profile"
-  | "project"
-  | "decision"
-  | "lesson"
-  | "task";
+export type { AccountKind, BotPreset, BotProfile, BotSettings, MemoryType } from "../core/types";
+import type { AccountKind, MemoryType } from "../core/types";
 export interface Profile {
   profile_key: string;
   basis: "explicit" | "inferred";
@@ -96,6 +90,7 @@ export interface Memory {
 export interface Account {
   id: string;
   name: string;
+  kind: AccountKind;
   status?: string;
   active_token_id?: string | null;
   memory_count?: number;
@@ -129,12 +124,23 @@ export interface Link {
   type: string;
   strength: number;
   revision: number;
+  created_at: number;
+  updated_at?: number;
 }
 export interface Graph {
   nodes: Memory[];
   edges: Link[];
   truncated: boolean;
 }
+export interface Bootstrap {
+  profile: import("../core/types").BotProfile;
+  persona: unknown | null;
+  memories: unknown[];
+  estimated_tokens: number;
+  budget_exhausted: boolean;
+  warnings: string[];
+}
+
 export interface Config {
   revision: number;
   importanceFactor: number;

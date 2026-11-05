@@ -110,7 +110,11 @@ export function createMcpHandler<C>(service: McpService<C>) {
           description: toolDescriptions[name],
           inputSchema: schema,
           annotations: {
-            readOnlyHint: name === "memory_get" || name === "memory_config_get",
+            readOnlyHint:
+              name === "memory_search" ||
+              name === "memory_get" ||
+              name === "memory_config_get" ||
+              name === "memory_bootstrap",
             destructiveHint:
               name === "memory_merge" || name === "memory_archive",
             idempotentHint: true,

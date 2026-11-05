@@ -202,7 +202,11 @@ export class MemoryService implements McpService<Context> {
     let result: unknown;
     if (tool === "memory_search")
       result = await this.search(ctx, input as SearchInput, embedding);
-    else if (tool === "memory_get" || tool === "memory_config_get")
+    else if (
+      tool === "memory_get" ||
+      tool === "memory_config_get" ||
+      tool === "memory_bootstrap"
+    )
       result = await this.database.read(
         ctx.tokenId,
         "execute",

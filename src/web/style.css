@@ -1158,3 +1158,128 @@ td button {
     transition: none !important;
   }
 }
+.graph-shell {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 14px;
+  align-items: stretch;
+}
+.graph-side {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  background: #f8faf5;
+  border: 1px solid #e3ecdc;
+  border-radius: 14px;
+  align-self: stretch;
+}
+.graph-side label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+.graph-results {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow: auto;
+}
+.graph-results .text-button {
+  font-size: 12px;
+}
+.graph-results small {
+  color: #8c9d81;
+}
+.graph-timeline {
+  border: 1px solid #e3ecdc;
+  border-radius: 10px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+.graph-timeline legend {
+  font-size: 12px;
+  padding: 0 6px;
+}
+.graph-stage {
+  position: relative;
+  min-height: 560px;
+}
+.graph-detail {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: min(320px, 86%);
+  max-height: calc(100% - 28px);
+  overflow: auto;
+  background: rgba(8, 24, 26, 0.92);
+  color: #e8f6f0;
+  border: 1px solid rgba(103, 230, 208, 0.25);
+  border-radius: 14px;
+  padding: 14px;
+  z-index: 2;
+  backdrop-filter: blur(6px);
+}
+.graph-detail header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.graph-detail h3 {
+  margin: 12px 0 6px;
+  font-size: 13px;
+}
+.graph-detail .full-content {
+  font-size: 12px;
+  margin: 8px 0;
+}
+.graph-detail small {
+  color: rgba(200, 255, 243, 0.65);
+}
+.relation-chain {
+  border-top: 1px solid rgba(103, 230, 208, 0.16);
+  padding: 8px 0;
+}
+.relation-path {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.relation-node.current {
+  color: #66e6d0;
+}
+.relation-arrow {
+  color: #ffc66d;
+  font-size: 11px;
+}
+.graph-detail .text-button {
+  color: #bfe9dd;
+}
+.graph-detail .toolbar {
+  margin-top: 6px;
+  gap: 8px;
+}
+.graph-detail .toolbar button {
+  font-size: 11px;
+}
+.graph-help {
+  font-size: 11px;
+  color: #8c9d81;
+  margin: 0;
+}
+@media (max-width: 900px) {
+  .graph-shell {
+    grid-template-columns: 1fr;
+  }
+  .graph-stage {
+    min-height: 420px;
+  }
+}

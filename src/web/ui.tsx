@@ -298,15 +298,11 @@ export function Feedback({ error, notice }: { error: string; notice: string }) {
 export function date(value: number | null | undefined) {
   return value ? new Date(value).toLocaleString("zh-CN") : "—";
 }
-export const types = {
-  fact: "事实",
-  preference: "偏好",
-  profile: "画像",
-  project: "项目",
-  decision: "决策",
-  lesson: "经验",
-  task: "任务",
-};
+import { MEMORY_CATALOG } from "../core/catalog";
+import type { MemoryType } from "../core/types";
+export const types = Object.fromEntries(
+  MEMORY_CATALOG.map((item) => [item.key, item.label]),
+) as Record<MemoryType, string>;
 export function Heading({
   eyebrow,
   title,

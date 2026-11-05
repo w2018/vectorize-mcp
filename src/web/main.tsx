@@ -8,23 +8,26 @@ import { GraphView, Stats, Suggestions } from "./insights";
 import "./style.css";
 import { Trash } from "./trash";
 import { About } from "./about";
+import { QQBot } from "./qqbot";
 const navigation = [
+  ["stats", "▥", "统计面板"],
   ["memories", "▤", "记忆"],
   ["profiles", "◉", "关于我"],
   ["graph", "✧", "记忆星图"],
-  ["stats", "▥", "统计"],
   ["suggestions", "✓", "整理建议"],
   ["tokens", "⌘", "账户与凭据"],
   ["transfer", "⇄", "数据搬家"],
   ["backups", "◷", "备份"],
   ["settings", "⚙", "设置"],
   ["audit", "≡", "操作记录"],
+  ["qqbot", "✦", "QQBOT 人设"],
   ["trash", "♲", "回收站"],
+  ["about", "ⓘ", "关于"],
 ] as const;
 function App() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [sessionError, setSessionError] = useState("");
-  const [page, setPage] = useState("memories");
+  const [page, setPage] = useState("stats");
   const [subject, setSubject] = useState("");
   const [refresh, setRefresh] = useState(0);
   const [password, setPassword] = useState("");
@@ -57,9 +60,18 @@ function App() {
     return () => window.removeEventListener("session-expired", expired);
   }, []);
   useEffect(() => {
-    if (accounts.data && !accounts.data.items.some((a) => a.id === subject))
-      setSubject(accounts.data.items[0]?.id || "");
+    if (accounts.data && !accounts.data.items.some((a) => a.id === subject)) {
+      let remembered = "";
+      try { remembered = localStorage.getItem("vectorize.last-subject") || ""; } catch { /* storage may be disabled */ }
+      setSubject(accounts.data.items.some(a => a.id === remembered) ? remembered : accounts.data.items[0]?.id || "");
+    }
   }, [accounts.data, subject]);
+  const activeAccount = accounts.data?.items.find(a => a.id === subject);
+  const kind = activeAccount?.kind || "standard";
+  useEffect(() => {
+    if (kind !== "qqbot" && page === "qqbot") setPage("stats");
+    if (subject) { try { localStorage.setItem("vectorize.last-subject", subject); } catch { /* storage may be disabled */ } }
+  }, [kind, page, subject]);
   const reload = () => setRefresh((v) => v + 1);
   useEffect(() => {
     const changed = () => setRefresh((v) => v + 1);
@@ -125,6 +137,7 @@ function App() {
     "graph",
     "stats",
     "suggestions",
+    "qqbot",
     "transfer",
   ].includes(page);
   return (
@@ -135,7 +148,7 @@ function App() {
           href="#"
           onClick={(e) => {
             e.preventDefault();
-            setPage("memories");
+            setPage("stats");
           }}
         >
           <span className="brandmark">✧</span>
@@ -146,7 +159,9 @@ function App() {
         </a>
         <div className="workspace-label">我的工作空间</div>
         <nav aria-label="主导航">
-          {navigation.map(([key, icon, label]) => (
+          {navigation
+            .filter(([key]) => key !== "qqbot" || kind === "qqbot")
+            .map(([key, icon, label]) => (
             <button
               key={key}
               className={page === key ? "active" : ""}
@@ -161,12 +176,6 @@ function App() {
         <div className="sidebar-foot">
           <span className="status-dot" />
           独立账户 · 安全管理<small>每一条记忆，都由你掌握。</small>
-          <button
-            aria-current={page === "about" ? "page" : undefined}
-            onClick={() => setPage("about")}
-          >
-            ⓘ 关于
-          </button>
         </div>
       </aside>
       <div className="main-wrap">
@@ -185,6 +194,7 @@ function App() {
               {accounts.data?.items.map((a) => (
                 <option key={a.id} value={a.id}>
                   {a.name}
+                  {a.kind === "qqbot" ? " · QQBOT" : ""}
                   {a.status === "unbound" ? " · 未绑定凭据" : ""}
                 </option>
               ))}
@@ -230,10 +240,17 @@ function App() {
                 <Memories subject={subject} refresh={refresh} profiles />
               )}
               {page === "graph" && (
-                <GraphView subject={subject} refresh={refresh} />
+                <GraphView subject={subject} refresh={refresh} kind={kind} />
               )}
               {page === "stats" && (
-                <Stats subject={subject} refresh={refresh} />
+                <Stats
+                  subject={subject}
+                  refresh={refresh}
+                  onSelectAccount={setSubject}
+                />
+              )}
+              {page === "qqbot" && kind === "qqbot" && (
+                <QQBot subject={subject} refresh={refresh} />
               )}
               {page === "suggestions" && (
                 <Suggestions subject={subject} refresh={refresh} />

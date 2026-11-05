@@ -8,6 +8,7 @@ import {
   type Audit,
   type Backup,
   type Config,
+  type BotPreset,
   type Page,
   type Preview,
   type Token,
@@ -108,6 +109,9 @@ export function Accounts({
   const accounts = useResource<Page<Account>>("/accounts", refresh);
   const action = useAction();
   const [label, setLabel] = useState("");
+  const [bot, setBot] = useState(false);
+  const [presetId, setPresetId] = useState("gentle");
+  const presets = useResource<Page<BotPreset>>("/qqbot/presets", 0);
   const [issued, setIssued] = useState<IssuedCredential[]>([]);
   const [accessOpen, setAccessOpen] = useState(false);
   const [accessTokenId, setAccessTokenId] = useState<string | null>(null);
@@ -200,7 +204,15 @@ export function Accounts({
           className="inline-form"
           onSubmit={(e) => {
             e.preventDefault();
-            void action.run(() => create({ label }), "");
+            void action.run(
+              () =>
+                create({
+                  label,
+                  kind: bot ? "qqbot" : "standard",
+                  preset_id: bot ? presetId : undefined,
+                }),
+              "",
+            );
           }}
         >
           <label>
@@ -213,10 +225,39 @@ export function Accounts({
               placeholder="例如：我的工作助手"
             />
           </label>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={bot}
+              onChange={(e) => setBot(e.target.checked)}
+            />
+            供 QQBOT 使用
+          </label>
+          {bot && (
+            <label>
+              初始预设
+              <select
+                value={presetId}
+                onChange={(e) => setPresetId(e.target.value)}
+              >
+                {(presets.data?.items ?? []).map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           <button className="primary" disabled={action.busy}>
             创建凭据
           </button>
         </form>
+        {bot && (
+          <small>
+            QQBOT 账户额外拥有「人物 / 概念 / 人设」记忆类型与自定义关系，可在
+            QQBOT 人设页调整配置。
+          </small>
+        )}
       </section>
       <section className="panel padded">
         <h2>访问凭据</h2>
@@ -240,6 +281,10 @@ export function Accounts({
                   <tr key={t.id}>
                     <td>
                       <strong>{t.label}</strong>
+                      {accounts.data?.items.find((a) => a.id === t.subject_id)
+                        ?.kind === "qqbot" && (
+                        <span className="tag">QQBOT</span>
+                      )}
                       <small>{t.id}</small>
                     </td>
                     <td>{t.status === "active" ? "有效" : "已撤销"}</td>

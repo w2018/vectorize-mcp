@@ -53,6 +53,7 @@ export async function callWithRetry<T>(
     known &&
     (internal === "memory_get" ||
       internal === "memory_config_get" ||
+      internal === "memory_bootstrap" ||
       typeof args.request_id === "string");
   for (let attempt = 0; ; attempt++) {
     try {

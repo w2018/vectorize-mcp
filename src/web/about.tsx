@@ -14,7 +14,7 @@ export function About() {
           <dt>作者</dt>
           <dd>w2018</dd>
           <dt>版本</dt>
-          <dd>0.1.3</dd>
+          <dd>0.2.0</dd>
           <dt>开源协议</dt>
           <dd>MIT</dd>
           <dt>开源地址</dt>
