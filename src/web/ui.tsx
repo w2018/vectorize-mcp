@@ -343,6 +343,11 @@ export function Feedback({ error, notice }: { error: string; notice: string }) {
 export function date(value: number | null | undefined) {
   return value ? new Date(value).toLocaleString("zh-CN") : "—";
 }
+export function weightText(value: number | null | undefined) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value.toFixed(2)
+    : "—";
+}
 import { MEMORY_CATALOG } from "../core/catalog";
 import type { MemoryType } from "../core/types";
 export const types = Object.fromEntries(

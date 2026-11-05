@@ -20,6 +20,7 @@ import {
   types,
   useAction,
   useResource,
+  weightText,
 } from "./ui";
 export function MemoryEditor({
   subject,
@@ -388,7 +389,7 @@ export function Memories({
   };
   function prepare(m: Memory, kind: "archive" | "delete") {
     setDetail(null);
-    setReasonText("");
+    setReasonText("管理员整理");
     setReasonRequest({ memory: m, kind });
   }
   async function previewReason() {
@@ -513,6 +514,21 @@ export function Memories({
                   <span>找到 {m.retrieval_count} 次</span>
                   <div className="row-actions">
                     <button onClick={() => setEditing(m)}>编辑</button>
+                    {m.status === "archived" ? (
+                      <button
+                        disabled={action.busy || !!m.merged_into}
+                        onClick={() => setRestoreMemory(m)}
+                      >
+                        取消归档
+                      </button>
+                    ) : (
+                      <button
+                        disabled={action.busy}
+                        onClick={() => prepare(m, "archive")}
+                      >
+                        归档…
+                      </button>
+                    )}
                     <button
                       className="danger-outline"
                       disabled={action.busy}
@@ -563,7 +579,7 @@ export function Memories({
             <dt>被找到次数</dt>
             <dd>{detail.retrieval_count}（不等于会话数）</dd>
             <dt>服务端权重</dt>
-            <dd>{detail.weight ?? "—"}</dd>
+            <dd>{weightText(detail.weight)}</dd>
             <dt>最近确认</dt>
             <dd>{date(detail.confirmed_at)}</dd>
             <dt>有效截止</dt>
@@ -646,6 +662,7 @@ export function Memories({
               />
             </label>
             <footer>
+              <span>下一步：核对预览并确认执行</span>
               <button
                 type="button"
                 disabled={action.busy}
@@ -656,6 +673,7 @@ export function Memories({
               <button
                 className="primary"
                 disabled={action.busy || !reasonText.trim()}
+                title={reasonText.trim() ? undefined : "请先填写操作原因"}
               >
                 {action.busy ? "正在读取预览…" : "查看预览"}
               </button>

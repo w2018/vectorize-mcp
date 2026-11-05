@@ -23,6 +23,7 @@ import {
   types,
   useAction,
   useResource,
+  weightText,
 } from "./ui";
 import { MEMORY_CATALOG, QQBOT_LINK_CATALOG } from "../core/catalog";
 const colors = Object.fromEntries(
@@ -177,7 +178,7 @@ export function GraphView({
                   {n.title || n.content.slice(0, 60)}
                 </button>
                 <span>
-                  {types[n.type]} · 权重 {n.weight} · {date(n.created_at)}
+                  {types[n.type]} · 权重 {weightText(n.weight)} · {date(n.created_at)}
                 </span>
               </div>
             ))}
@@ -293,7 +294,7 @@ export function GraphView({
                   </header>
                   <p className="full-content">{visible.content}</p>
                   <small>
-                    {types[visible.type]} · 权重 {visible.weight} · 找到{" "}
+                    {types[visible.type]} · 权重 {weightText(visible.weight)} · 找到{" "}
                     {visible.retrieval_count} 次 · {date(visible.created_at)}
                   </small>
                   <h3>关系链</h3>
