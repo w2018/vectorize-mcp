@@ -145,8 +145,23 @@ export async function buildApp(options: AppOptions) {
       bodyLimit: 65536,
       handler: async (request, reply) => {
         const origin = request.headers.origin;
-        if (origin && origin !== options.origin)
-          return reply.code(403).send({ error: "Origin not allowed" });
+        if (origin && origin !== options.origin) {
+          // 允许本机回环地址访问（浏览器用 localhost/127.0.0.1 打开本服务时，
+          // Origin 与外网 PUBLIC_ORIGIN 不同但仍是同源请求）。其余跨站一律拒绝。
+          let allowed = false;
+          try {
+            const parsed = new URL(origin);
+            const host = request.headers.host;
+            allowed =
+              ["127.0.0.1", "localhost", "[::1]", "::1"].includes(
+                parsed.hostname.toLowerCase(),
+              ) && (!host || parsed.host.toLowerCase() === host.toLowerCase());
+          } catch {
+            allowed = false;
+          }
+          if (!allowed)
+            return reply.code(403).send({ error: "Origin not allowed" });
+        }
         reply.hijack();
         await mcp(request.raw, reply.raw, request.body);
       },

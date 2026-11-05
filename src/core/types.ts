@@ -240,6 +240,8 @@ export interface TokenInfo {
   revision: number;
   created_at: number;
   revoked_at: number | null;
+  /** 是否保存了可再次查看的令牌密文。 */
+  viewable?: boolean;
 }
 export interface TokenResult extends TokenInfo {
   kind: AccountKind;

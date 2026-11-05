@@ -7,6 +7,7 @@ import {
   type AccountKind,
   type Graph,
   type AccountStats,
+  type Config,
   type Link,
   type Memory,
   type Page,
@@ -583,7 +584,9 @@ export function Stats({
     "/stats/accounts" + query({ days }),
     refresh,
   );
+  const config = useResource<Config>("/config", refresh);
   const d = data.data;
+  const embeddingMissing = config.data && !config.data.embeddingModel;
   const metrics = [
     ["记忆总条数", d?.memory_total],
     ["记忆内容 token", d?.memory_total_tokens],
@@ -609,7 +612,12 @@ export function Stats({
       d?.degraded_rate == null ? "—" : (d.degraded_rate * 100).toFixed(1) + "%",
     ],
     ["索引失败", d?.index_failed],
-    ["平均返回 token", d?.average_returned_tokens ?? "—"],
+    [
+      "平均返回 token",
+      typeof d?.average_returned_tokens === "number"
+        ? d.average_returned_tokens.toFixed(1)
+        : "—",
+    ],
   ];
   return (
     <>
@@ -623,6 +631,7 @@ export function Stats({
           value={days}
           onChange={(e) => setDays(e.target.value)}
         >
+          <option value="1">最近 1 天</option>
           <option value="7">最近 7 天</option>
           <option value="30">最近 30 天</option>
           <option value="90">最近 90 天</option>
@@ -639,18 +648,41 @@ export function Stats({
         </div>
         <section className="panel padded">
           <h2>如何理解这些数字</h2>
+          {embeddingMissing && (
+            <div className="notice warning">
+              当前未配置向量编码器，检索只能走词法匹配（词法降级率会接近
+              100%）。到「设置 → 检索配置」填写 embeddingModel /
+              embeddingBaseUrl / embeddingDimension
+              后保存，可启用语义检索、明显提升召回率与有效命中率。
+            </div>
+          )}
           <p>
-            记忆内容 token 为服务端估算内容量；提取内容 token
-            为所选时间范围内实际返回内容的累计估算，不代表计费
-            token。没有检索请求时有效命中率显示为“—”。
+            <strong>有效命中率</strong> = 至少返回一条记忆的检索次数 ÷
+            检索总次数。它统计的是辅助助手实际发起的搜索，不包含手动浏览；历史窗口内此前因检索缺陷产生的空结果也会计入，修复后新的检索会逐步稀释它们，也可把时间范围切到「最近
+            1 天」观察最新表现。
           </p>
           <p>
-            被找到次数仅统计最终交给助手的记忆，不包含候选项、管理浏览和重复请求，次数不代表独立会话数。
+            <strong>提取内容 token</strong> 为所选时间范围内实际返回内容的累计估算，用于衡量检索带来的上下文成本，不代表计费
+            token；<strong>记忆内容 token</strong>
+            是当前所有记忆正文的估算总量。没有检索请求时命中率、空结果率等显示为“—”。
           </p>
           <p>
-            词法降级表示该次检索没有使用有效向量。请结合编码器配置和索引失败数量检查，不将词法检索视为语义检索正常。
+            <strong>被找到次数</strong>仅统计最终交给助手的记忆，不包含候选项、管理浏览和重复请求，次数不代表独立会话数；同一记忆在不同会话中被再次命中会累加。
           </p>
-          <small>统计时点：{date(d?.as_of)}</small>
+          <p>
+            <strong>词法降级率</strong>表示该次检索没有使用有效向量（编码器未配置、索引失败或向量过期时会降级为纯词法）。请结合下方「索引失败」和编码器配置排查，不要把词法检索当作语义检索正常。
+          </p>
+          <p>
+            <strong>如何提高命中率</strong>：① 让 Agent
+            在会话开始就检索，并传入贴近记忆内容的自然语言 query（无需再靠穷举关键词）；
+            ② 配置向量编码器启用语义检索；③
+            记忆正文写完整句子、关键词填写同义说法；④
+            关注「空结果率」「词法降级率」「索引失败」三项，任一异常先修检索链路。
+          </p>
+          <small>
+            统计口径：按所选时间范围实时聚合检索与记忆数据，页面打开或切换范围时重新计算；统计时点：
+            {date(d?.as_of)}
+          </small>
         </section>
       </State>
       <section className="panel padded">

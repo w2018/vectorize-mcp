@@ -15,7 +15,7 @@ if (process.argv.includes("init-admin")) {
   const password = process.env.ADMIN_PASSWORD;
   if (!password)
     throw new Error(
-      "Set ADMIN_PASSWORD (12–1024 characters) for initialization",
+      "Set ADMIN_PASSWORD (8–1024 characters) for initialization",
     );
   await writeFile(
     passwordFile,
@@ -29,10 +29,10 @@ if (process.argv.includes("init-admin")) {
   const password = process.env.ADMIN_PASSWORD;
   if (!password)
     throw new Error(
-      "Set ADMIN_PASSWORD (12–1024 characters) to reset the administrator password",
+      "Set ADMIN_PASSWORD (8–1024 characters) to reset the administrator password",
     );
   if (password.length < 12 || password.length > 1024)
-    throw new Error("ADMIN_PASSWORD must contain 12–1024 characters");
+    throw new Error("ADMIN_PASSWORD must contain 8–1024 characters");
   const tmp = passwordFile + ".tmp";
   await writeFile(tmp, JSON.stringify({ hash: hashPassword(password) }), {
     mode: 0o600,

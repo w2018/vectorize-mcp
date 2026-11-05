@@ -182,7 +182,16 @@ export async function registerAdmin(
     const s = id ? sessions.get(id) : undefined;
     return s && s.expires > Date.now() ? s : undefined;
   };
-  const issue = (reply: FastifyReply, authenticated: boolean) => {
+  // 只有请求本身经 HTTPS（含反代 x-forwarded-proto）时才给 cookie 加 Secure；
+  // 否则设置成 https 对外地址后，用 127.0.0.1 明文访问会因 Secure 丢失会话而“无法保存/无效”。
+  const secureCookieFor = (req: FastifyRequest) => {
+    const forwarded = req.headers["x-forwarded-proto"];
+    const proto = (
+      Array.isArray(forwarded) ? forwarded[0] : forwarded
+    )?.split(",")[0].trim() || req.protocol;
+    return proto === "https";
+  };
+  const issue = (reply: FastifyReply, authenticated: boolean, req: FastifyRequest) => {
     cleanup();
     if (sessions.size >= 10000) throw new DomainError("SERVER_BUSY");
     const s = {
@@ -196,7 +205,7 @@ export async function registerAdmin(
       path: "/",
       httpOnly: true,
       sameSite: "strict",
-      secure: options.secureCookie,
+      secure: secureCookieFor(req),
       maxAge: SESSION_MS / 1000,
     });
     return s;
@@ -268,7 +277,7 @@ export async function registerAdmin(
     });
   };
   route("GET", "/auth/session", async (req, reply) => {
-    const s = current(req) ?? issue(reply, false);
+    const s = current(req) ?? issue(reply, false, req);
     return { authenticated: s.authenticated, csrf_token: s.csrf };
   });
   route(
@@ -279,7 +288,7 @@ export async function registerAdmin(
         throw new DomainError("UNAUTHENTICATED");
       const prior = current(req);
       if (prior) sessions.delete(prior.id);
-      const s = issue(reply, true);
+      const s = issue(reply, true, req);
       return { authenticated: true, csrf_token: s.csrf };
     },
     { config: { rateLimit: { max: 5, timeWindow: "1 minute" } } },
@@ -291,7 +300,7 @@ export async function registerAdmin(
       path: "/",
       httpOnly: true,
       sameSite: "strict",
-      secure: options.secureCookie,
+      secure: secureCookieFor(req),
     });
     return { authenticated: false };
   });
@@ -309,7 +318,7 @@ export async function registerAdmin(
       const b = body(req);
       const currentPassword = text(b.current_password);
       const newPassword = text(b.new_password);
-      if (newPassword.length < 12 || newPassword.length > 1024)
+      if (newPassword.length < 8 || newPassword.length > 1024)
         throw new DomainError("VALIDATION_ERROR");
       if (newPassword === currentPassword)
         throw new DomainError("VALIDATION_ERROR");
@@ -491,6 +500,15 @@ export async function registerAdmin(
   route("GET", "/tokens", async (req) =>
     paged(await read<unknown[]>("listTokens"), query(req)),
   );
+  route("POST", "/tokens/:id/reveal", async (req) => {
+    const revealed = await write<RecordData | null>("revealToken", param(req));
+    if (!revealed)
+      throw new DomainError(
+        "NOT_FOUND",
+        "该凭据没有可查看的明文（旧版本创建），请重新签发后再查看。",
+      );
+    return revealed;
+  });
   route("POST", "/tokens", async (req) => {
     const b = body(req);
     return write(

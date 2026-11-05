@@ -173,6 +173,23 @@ export function Accounts({
       }),
     );
   }
+  async function reveal(token: Token) {
+    await action.run(async () => {
+      const result = await api<TokenResponse>(
+        "/tokens/" + token.id + "/reveal",
+        "POST",
+        writeBody({}),
+      );
+      rememberIssued(
+        {
+          ...result,
+          label: token.label,
+          subject_id: token.subject_id,
+        },
+        token.label,
+      );
+    }, "已加载凭据，可在下方查看与复制");
+  }
   function requestRotate(token: Token) {
     return action.run(async () => {
       const value = await api<Preview>(
@@ -202,7 +219,7 @@ export function Accounts({
         <h2>创建新账户</h2>
         <p>
           创建后会展开「接入方式」折叠块，可直接复制可粘贴的 MCP
-          配置；凭据明文只在本页会话内保留。
+          配置；凭据明文会安全保存，可随时在列表中查看与复制。
         </p>
         <form
           className="inline-form"
@@ -298,6 +315,18 @@ export function Accounts({
                     </td>
                     <td>
                       {t.status === "active" && (
+                        <>
+                        <button
+                          disabled={action.busy || !t.viewable}
+                          title={
+                            t.viewable
+                              ? "查看并复制凭据明文"
+                              : "该凭据由旧版本创建，重新签发后即可随时查看"
+                          }
+                          onClick={() => void reveal(t)}
+                        >
+                          查看
+                        </button>{" "}
                         <button
                           disabled={action.busy}
                           onClick={() => openAccess(t.id)}
@@ -309,6 +338,7 @@ export function Accounts({
                         >
                           接入…
                         </button>
+                        </>
                       )}{" "}
                       <button
                         className="danger-outline"
@@ -441,14 +471,14 @@ export function Accounts({
                         复制 Token
                       </button>
                       <span className="access-hint">
-                        凭据明文仅本页会话内保留，刷新后需重新签发。
+                        凭据明文已安全保存，可随时在列表点击「查看」再次复制。
                       </span>
                     </div>
                   </>
                 ) : (
                   <div className="notice warning">
-                    该凭据的明文已不可读取。重新签发会立即废弃旧
-                    Token，并生成可直接复制的新配置；账户记忆与计数保持不变。
+                    该凭据由旧版本创建，未保存可查看的明文。重新签发会立即废弃旧
+                    Token，并生成可随时查看与复制的新凭据；账户记忆与计数保持不变。
                     <div className="access-actions">
                       <button
                         disabled={action.busy}
@@ -1991,7 +2021,7 @@ function SecuritySettings() {
   const [next, setNext] = useState("");
   const [confirm, setConfirm] = useState("");
   const [done, setDone] = useState(false);
-  const weak = next.length > 0 && (next.length < 12 || next.length > 1024);
+  const weak = next.length > 0 && (next.length < 8 || next.length > 1024);
   const mismatch = confirm.length > 0 && next !== confirm;
   const ready =
     current.length > 0 &&
@@ -2003,7 +2033,7 @@ function SecuritySettings() {
     <section className="panel padded" id="security">
       <h2>安全</h2>
       <p className="hint">
-        修改管理员密码，长度 12–1024 个字符。修改成功后所有登录会话立即失效，需要用新密码重新登录。
+        修改管理员密码，长度 8–1024 个字符。修改成功后所有登录会话立即失效，需要用新密码重新登录。
       </p>
       <Feedback error={action.error} notice={action.notice} />
       {done ? (
@@ -2064,7 +2094,7 @@ function SecuritySettings() {
               onChange={(e) => setConfirm(e.target.value)}
             />
           </label>
-          {weak && <small className="hint">新密码需 12–1024 个字符。</small>}
+          {weak && <small className="hint">新密码需 8–1024 个字符。</small>}
           {mismatch && (
             <small className="hint">两次输入的新密码不一致。</small>
           )}
@@ -2080,7 +2110,8 @@ function SecuritySettings() {
 }
 
 function NetworkSettings() {
-  const net = useResource<ServerNetwork>("/server/network", 0);
+  const [version, setVersion] = useState(0);
+  const net = useResource<ServerNetwork>("/server/network", version);
   const action = useAction();
   const [bind, setBind] = useState<"127.0.0.1" | "0.0.0.0">("127.0.0.1");
   const [origin, setOrigin] = useState("");
@@ -2126,6 +2157,7 @@ function NetworkSettings() {
                     }),
                   );
                   setSaved(true);
+                  setVersion((v) => v + 1);
                 }, "网络设置已保存");
               }}
             >
@@ -2159,7 +2191,12 @@ function NetworkSettings() {
                 </small>
               )}
               <footer>
-                {saved && <span>已保存，需重启服务生效。</span>}
+                {saved && (
+                  <span>
+                    已保存到配置文件，需重启服务生效；重启后请使用上面的「对外访问地址」访问（本机
+                    127.0.0.1 仍可用于本机管理）。
+                  </span>
+                )}
                 <button className="primary" disabled={action.busy || locked}>
                   {action.busy ? "正在保存…" : "保存网络设置"}
                 </button>

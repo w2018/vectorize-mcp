@@ -101,6 +101,8 @@ export interface Token {
   status: string;
   created_at: number;
   last_used_at: number | null;
+  /** 是否保存了可再次查看的令牌明文。 */
+  viewable?: boolean;
 }
 export interface Page<T> {
   items: T[];

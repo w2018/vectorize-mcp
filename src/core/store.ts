@@ -1,6 +1,8 @@
 import Database from "better-sqlite3";
 import * as sqliteVec from "sqlite-vec";
 import {
+  createCipheriv,
+  createDecipheriv,
   createHash,
   randomBytes,
   randomUUID,
@@ -14,6 +16,7 @@ import {
   copyFileSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { schema } from "./schema.js";
@@ -122,6 +125,7 @@ export class Store {
   private trash?: TrashVault;
   private readonly trashPath: string;
   private readonlyMode: boolean;
+  private secretKeyCache?: Buffer;
   constructor(
     public readonly path: string,
     options: { readonly?: boolean; logPath?: string; trashPath?: string } = {},
@@ -149,6 +153,11 @@ export class Store {
     }
     if (!options.readonly) {
       this.db.exec(schema);
+      const tokenColumns = this.rows(
+        "PRAGMA table_info(tokens)",
+      ) as unknown as { name: string }[];
+      if (!tokenColumns.some((column) => column.name === "secret_enc"))
+        this.db.exec("ALTER TABLE tokens ADD COLUMN secret_enc TEXT");
       this.db
         .prepare("INSERT OR IGNORE INTO metadata VALUES (?,?)")
         .run("schema_version", "3");
@@ -349,9 +358,75 @@ export class Store {
     };
   }
   listTokens(): TokenInfo[] {
-    return this.rows(
-      "SELECT id,subject_id,label,status,revision,created_at,revoked_at FROM tokens ORDER BY created_at DESC",
-    ) as unknown as TokenInfo[];
+    const rows = this.rows(
+      "SELECT id,subject_id,label,status,revision,created_at,revoked_at,secret_enc IS NOT NULL AS viewable_raw FROM tokens ORDER BY created_at DESC",
+    ) as unknown as (TokenInfo & { viewable_raw: number })[];
+    return rows.map(({ viewable_raw, ...row }) => ({
+      ...row,
+      viewable: !!viewable_raw,
+    }));
+  }
+  /** 读取令牌明文所在密钥（AES-256-GCM），用于“随时查看访问凭据”。 */
+  private secretKey(): Buffer {
+    if (this.secretKeyCache) return this.secretKeyCache;
+    if (this.path === ":memory:") {
+      this.secretKeyCache = randomBytes(32);
+      return this.secretKeyCache;
+    }
+    const file = this.path + ".token-key";
+    try {
+      const raw = Buffer.from(readFileSync(file, "utf8").trim(), "base64");
+      if (raw.length !== 32) throw new Error("bad key");
+      this.secretKeyCache = raw;
+    } catch {
+      const key = randomBytes(32);
+      writeFileSync(file, key.toString("base64"), { mode: 0o600 });
+      this.secretKeyCache = key;
+    }
+    return this.secretKeyCache;
+  }
+  private sealSecret(secret: string): string {
+    const iv = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", this.secretKey(), iv);
+    const data = Buffer.concat([cipher.update(secret, "utf8"), cipher.final()]);
+    return [
+      iv.toString("base64"),
+      cipher.getAuthTag().toString("base64"),
+      data.toString("base64"),
+    ].join(".");
+  }
+  private openSecret(blob: unknown): string | null {
+    if (typeof blob !== "string" || !blob) return null;
+    try {
+      const [iv, tag, data] = blob.split(".");
+      if (!iv || !tag || !data) return null;
+      const decipher = createDecipheriv(
+        "aes-256-gcm",
+        this.secretKey(),
+        Buffer.from(iv, "base64"),
+      );
+      decipher.setAuthTag(Buffer.from(tag, "base64"));
+      return Buffer.concat([
+        decipher.update(Buffer.from(data, "base64")),
+        decipher.final(),
+      ]).toString("utf8");
+    } catch {
+      return null;
+    }
+  }
+  /** 仅对有效凭据返回明文；旧版本创建的凭据没有密文时返回 null。 */
+  revealToken(tokenId: string) {
+    const t = this.row("SELECT * FROM tokens WHERE id=?", tokenId);
+    if (!t || t.status !== "active") return null;
+    const token = this.openSecret(t.secret_enc);
+    if (!token) return null;
+    this.audit(this.adminFor(String(t.subject_id)), "token.view", [tokenId]);
+    return {
+      id: String(t.id),
+      subject_id: String(t.subject_id),
+      label: String(t.label),
+      token,
+    };
   }
   listAccounts() {
     return this.rows(
@@ -646,8 +721,20 @@ export class Store {
         secret = "vmcp_" + id + "." + randomBytes(32).toString("base64url"),
         now = Date.now();
       this.db
-        .prepare("INSERT INTO tokens VALUES (?,?,?,?,?,?,?,?)")
-        .run(id, subjectId, label, hash(secret), "active", 1, now, null);
+        .prepare(
+          "INSERT INTO tokens(id,subject_id,label,digest,status,revision,created_at,revoked_at,secret_enc) VALUES (?,?,?,?,?,?,?,?,?)",
+        )
+        .run(
+          id,
+          subjectId,
+          label,
+          hash(secret),
+          "active",
+          1,
+          now,
+          null,
+          this.sealSecret(secret),
+        );
       this.db
         .prepare(
           "UPDATE subjects SET access_state=?,auth_epoch=auth_epoch+1 WHERE id=?",
@@ -788,8 +875,20 @@ export class Store {
         )
         .run("revoked", now, tokenId);
       this.db
-        .prepare("INSERT INTO tokens VALUES (?,?,?,?,?,?,?,?)")
-        .run(id, t!.subject_id, t!.label, hash(secret), "active", 1, now, null);
+        .prepare(
+          "INSERT INTO tokens(id,subject_id,label,digest,status,revision,created_at,revoked_at,secret_enc) VALUES (?,?,?,?,?,?,?,?,?)",
+        )
+        .run(
+          id,
+          t!.subject_id,
+          t!.label,
+          hash(secret),
+          "active",
+          1,
+          now,
+          null,
+          this.sealSecret(secret),
+        );
       this.db
         .prepare(
           "UPDATE subjects SET access_state=?,auth_epoch=auth_epoch+1 WHERE id=?",
