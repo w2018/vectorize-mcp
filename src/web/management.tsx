@@ -22,6 +22,49 @@ import {
   useAction,
   useResource,
 } from "./ui";
+type IssuedCredential = {
+  id: string;
+  label: string;
+  subject_id: string;
+  token: string;
+  created_at: number;
+};
+type McpFormat = "opencode" | "claude" | "http";
+function mcpJson(format: McpFormat, token: string): string {
+  const url = window.location.origin + "/mcp";
+  const authorization = "Bearer " + token;
+  if (format === "opencode")
+    return JSON.stringify(
+      {
+        $schema: "https://opencode.ai/config.json",
+        mcp: {
+          vectorize: {
+            type: "remote",
+            url,
+            enabled: true,
+            headers: { Authorization: authorization },
+          },
+        },
+      },
+      null,
+      2,
+    );
+  if (format === "claude")
+    return JSON.stringify(
+      {
+        mcpServers: {
+          vectorize: { type: "http", url, headers: { Authorization: authorization } },
+        },
+      },
+      null,
+      2,
+    );
+  return JSON.stringify(
+    { mcp: { vectorize: { type: "remote", url, headers: { Authorization: authorization } } } },
+    null,
+    2,
+  );
+}
 type Pending = {
   title: string;
   value: Preview;
@@ -40,32 +83,49 @@ export function Accounts({
   const accounts = useResource<Page<Account>>("/accounts", refresh);
   const action = useAction();
   const [label, setLabel] = useState("");
-  const [secret, setSecret] = useState<string | null>(null);
+  const [issued, setIssued] = useState<IssuedCredential[]>([]);
+  const [accessId, setAccessId] = useState<string | null>(null);
+  const [format, setFormat] = useState<McpFormat>("opencode");
   const [pending, setPending] = useState<Pending | null>(null);
   async function create(body: Record<string, unknown>) {
     const result = await api<{
+      id?: string;
+      label?: string;
+      subject_id?: string;
       token?: string;
       secret?: string;
       secret_available?: boolean;
     }>("/tokens", "POST", writeBody(body));
     onChange();
     setLabel("");
-    if (result.token || result.secret)
-      setSecret(result.token || result.secret || null);
-    else
+    const token = result.token || result.secret;
+    if (!token)
       throw new Error("凭据已创建，但无法再次显示。请撤销该凭据后重新创建。");
+    const record: IssuedCredential = {
+      id: result.id ?? token.slice(0, 12),
+      label: result.label ?? String(body.label ?? "新凭据"),
+      subject_id: result.subject_id ?? "",
+      token,
+      created_at: Date.now(),
+    };
+    setIssued((list) => [
+      record,
+      ...list.filter((item) => item.id !== record.id),
+    ]);
+    setAccessId(record.id);
   }
+  const access = issued.find((item) => item.id === accessId) ?? null;
   return (
     <>
       <Heading
         eyebrow="ACCESS"
         title="账户与访问凭据"
-        description="一枚有效 Token 对应一个独立账户。同一 Token 可在多个客户端使用。"
+        description="一枚有效 Token 对应一个独立账户。创建后可一键复制 MCP 配置，支持切换本次会话签发的凭据。"
       />
       <Feedback error={action.error || accounts.error} notice={action.notice} />
       <section className="panel padded">
         <h2>创建新账户</h2>
-        <p>凭据只展示一次，请在关闭弹窗前妥善保存。</p>
+        <p>创建后可直接复制可粘贴的 MCP 配置；凭据只展示一次，请妥善保存。</p>
         <form
           className="inline-form"
           onSubmit={(e) => {
@@ -118,6 +178,15 @@ export function Accounts({
                       <small>{date(t.last_used_at)}</small>
                     </td>
                     <td>
+                      {issued.some((item) => item.id === t.id) && (
+                        <button
+                          disabled={action.busy}
+                          onClick={() => setAccessId(t.id)}
+                          title="查看并复制可粘贴的 MCP 配置"
+                        >
+                          接入…
+                        </button>
+                      )}{" "}
                       <button
                         className="danger-outline"
                         disabled={action.busy || t.status !== "active"}
@@ -224,27 +293,67 @@ export function Accounts({
           }
         />
       )}
-      {secret && (
-        <Modal title="请保存你的访问凭据" onClose={() => setSecret(null)}>
+      {access && (
+        <Modal title="接入 MCP" onClose={() => setAccessId(null)}>
           <div className="notice warning">
-            关闭后无法再次查看。请勿将凭据放入 URL、公开仓库或聊天记录。
+            凭据明文仅在本次会话内保留，刷新页面后无法再次查看。请勿放入 URL、公开仓库或聊天记录。
           </div>
+          {issued.length > 1 && (
+            <label>
+              切换凭据
+              <select
+                value={access.id}
+                onChange={(e) => setAccessId(e.target.value)}
+              >
+                {issued.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           <label>
-            仅此次可见
-            <textarea readOnly rows={3} value={secret} spellCheck={false} />
+            接入方式
+            <select
+              value={format}
+              onChange={(e) => setFormat(e.target.value as McpFormat)}
+            >
+              <option value="opencode">opencode（远程 HTTP）</option>
+              <option value="claude">Claude / 通用 mcpServers</option>
+              <option value="http">通用远程 MCP</option>
+            </select>
+          </label>
+          <label>
+            可直接粘贴的配置
+            <textarea
+              readOnly
+              rows={11}
+              value={mcpJson(format, access.token)}
+              spellCheck={false}
+            />
           </label>
           <footer>
             <button
               onClick={() =>
                 void action.run(async () => {
-                  await navigator.clipboard.writeText(secret);
-                }, "已复制，请妥善保存")
+                  await navigator.clipboard.writeText(mcpJson(format, access.token));
+                }, "已复制 MCP 配置")
               }
             >
-              复制凭据
+              复制 JSON
             </button>
-            <button className="primary" onClick={() => setSecret(null)}>
-              已保存，关闭
+            <button
+              onClick={() =>
+                void action.run(async () => {
+                  await navigator.clipboard.writeText(access.token);
+                }, "已复制凭据")
+              }
+            >
+              复制 Token
+            </button>
+            <button className="primary" onClick={() => setAccessId(null)}>
+              完成
             </button>
           </footer>
           <Feedback error={action.error} notice={action.notice} />
