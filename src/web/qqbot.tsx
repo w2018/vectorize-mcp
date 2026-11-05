@@ -8,8 +8,8 @@ import { ConfirmDialog, Feedback, Heading, State, useAction, useResource } from 
 
 type Tab = "persona" | "boundaries" | "presets" | "context";
 type Pending =
-  | { kind: "settings"; patch: Partial<BotSettings>; reason: string }
-  | { kind: "preset"; preset: BotPreset; writeExamples: boolean; reason: string };
+  | { kind: "settings"; patch: Partial<BotSettings>; reason: string; revision: number; accountName: string }
+  | { kind: "preset"; preset: BotPreset; writeExamples: boolean; reason: string; revision: number; accountName: string };
 const textFields: [keyof BotSettings, string][] = [
   ["bot_name", "机器人名称"], ["identity", "身份背景"], ["personality", "性格"],
   ["tone", "口吻"], ["language", "语言"], ["answer_length", "回答长度"],
@@ -68,7 +68,8 @@ export function QQBot({
     setDraft(current => current ? { ...current, [key]: value } : current);
   function save() {
     if (!draft) return;
-    setPending({ kind: "settings", patch: draft, reason });
+    if (!profile.data) return;
+    setPending({ kind: "settings", patch: draft, reason, revision: profile.data.revision, accountName: selectedAccount?.name || "" });
   }
   const tabs: [Tab, string][] = [["persona", "人设"], ["boundaries", "边界"], ["presets", "预设"], ["context", "上下文预览"]];
   return <>
@@ -138,7 +139,7 @@ export function QQBot({
               <details><summary>查看人设正文</summary><p className="full-content">{preset.persona.content}</p></details>
               <div className="toolbar">
                 <button onClick={() => { setDraft(structuredClone(preset.settings)); setTab("persona"); }}>仅填入表单</button>
-                <button className="primary" onClick={() => setPending({ kind: "preset", preset, writeExamples, reason: "应用预设：" + preset.name })}>应用并覆盖…</button>
+                <button className="primary" onClick={() => setPending({ kind: "preset", preset, writeExamples, reason: "应用预设：" + preset.name, revision: profile.data!.revision, accountName: selectedAccount?.name || "" })}>应用并覆盖…</button>
               </div>
             </article>)}
             <label className="check"><input type="checkbox" checked={writeExamples} onChange={e => setWriteExamples(e.target.checked)} />同时写入示例人物和概念记忆</label>
@@ -159,15 +160,15 @@ export function QQBot({
         </section>}
       </>}
     </State>
-    {pending && profile.data && <ConfirmDialog
+    {pending && <ConfirmDialog
       title={pending.kind === "preset" ? "应用预设并覆盖当前配置" : "保存 QQBOT 配置"}
       onClose={() => setPending(null)}
       onConfirm={async () => {
-        if (pending.kind === "settings") await api("/qqbot", "PUT", writeBody({ subject_id: botSubject, patch: pending.patch, expected_revision: profile.data!.revision, reason: pending.reason }));
-        else await api("/qqbot/apply-preset", "POST", writeBody({ subject_id: botSubject, preset_id: pending.preset.id, expected_revision: profile.data!.revision, write_examples: pending.writeExamples, reason: pending.reason }));
+        if (pending.kind === "settings") await api("/qqbot", "PUT", writeBody({ subject_id: botSubject, patch: pending.patch, expected_revision: pending.revision, reason: pending.reason }));
+        else await api("/qqbot/apply-preset", "POST", writeBody({ subject_id: botSubject, preset_id: pending.preset.id, expected_revision: pending.revision, write_examples: pending.writeExamples, reason: pending.reason }));
         setVersion(v => v + 1); dataChanged();
       }}>
-      <p>将修改账户「{selectedAccount?.name}」的配置版本 {profile.data.revision}；若版本冲突，请关闭后重新读取，不会盲目覆盖。</p>
+      <p>将修改账户「{pending.accountName}」的配置版本 {pending.revision}；若版本冲突，请关闭后重新读取，不会盲目覆盖。</p>
       {pending.kind === "preset" && <p>预设「{pending.preset.name}」会替换当前配置与启用人设记忆{pending.writeExamples ? "，并写入示例记忆" : "，不写示例记忆"}。</p>}
       {pending.kind === "settings" && <p>{pending.reason}</p>}
     </ConfirmDialog>}
