@@ -2115,13 +2115,9 @@ function NetworkSettings() {
   const net = useResource<ServerNetwork>("/server/network", version);
   const action = useAction();
   const [bind, setBind] = useState<"127.0.0.1" | "0.0.0.0">("127.0.0.1");
-  const [origin, setOrigin] = useState("");
   const [saved, setSaved] = useState(false);
   useEffect(() => {
-    if (net.data) {
-      setBind(net.data.saved.bind_host);
-      setOrigin(net.data.saved.public_origin ?? "");
-    }
+    if (net.data) setBind(net.data.saved.bind_host);
   }, [net.data]);
   const override = net.data?.env_override;
   const locked = Boolean(override?.host);
@@ -2129,7 +2125,7 @@ function NetworkSettings() {
     <section className="panel padded" id="network">
       <h2>网络访问</h2>
       <p className="hint">
-        控制服务监听的地址。默认仅本机可访问；对外开放时请同时填写浏览器实际访问的完整地址，默认使用 HTTP，公网访问建议套一层 HTTPS 反向代理。保存后需重启服务生效。
+        控制服务监听的地址。内网使用选 127.0.0.1，局域网/外网访问选 0.0.0.0；不再要求填写对外地址，也不强制 HTTPS。保存后需重启服务生效。
       </p>
       <State loading={net.loading} error={net.error}>
         {net.data && (
@@ -2141,8 +2137,7 @@ function NetworkSettings() {
               </div>
             ) : null}
             <div className="notice">
-              当前运行：监听 {net.data.bind_host}，对外地址 {net.data.public_origin}，端口{" "}
-              {net.data.port}
+              当前运行：监听 {net.data.bind_host}，端口 {net.data.port}
             </div>
             <form
               className="editor-form"
@@ -2152,10 +2147,7 @@ function NetworkSettings() {
                   await api(
                     "/server/network",
                     "PUT",
-                    writeBody({
-                      bind_host: bind,
-                      public_origin: origin.trim() || null,
-                    }),
+                    writeBody({ bind_host: bind }),
                   );
                   setSaved(true);
                   setVersion((v) => v + 1);
@@ -2176,26 +2168,16 @@ function NetworkSettings() {
                   <option value="0.0.0.0">对外开放（0.0.0.0，需自行保障网络安全）</option>
                 </select>
               </label>
-              <label>
-                对外访问地址（Origin）
-                <input
-                  aria-label="对外访问地址"
-                  placeholder="https://mem.example.com"
-                  value={origin}
-                  disabled={locked}
-                  onChange={(e) => setOrigin(e.target.value)}
-                />
-              </label>
               {bind === "0.0.0.0" && (
                 <small className="hint">
-                  选择对外开放时必须填写对外访问地址（默认支持 HTTP）。
+                  选择 0.0.0.0 后，同一局域网内的设备可直接通过本机 IP 访问。
                 </small>
               )}
               <footer>
                 {saved && (
                   <span>
-                    已保存到配置文件，需重启服务生效；重启后请使用上面的「对外访问地址」访问（本机
-                    127.0.0.1 仍可用于本机管理）。
+                    已保存到配置文件，需重启服务生效；本机仍可用 127.0.0.1 管理，局域网设备用本机
+                    IP 访问。
                   </span>
                 )}
                 <button className="primary" disabled={action.busy || locked}>

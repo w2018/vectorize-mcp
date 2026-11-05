@@ -2,11 +2,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { hashPassword } from "./password.js";
 import { buildApp } from "./app.js";
-import {
-  isLoopbackOrigin,
-  readServerSettings,
-  validOrigin,
-} from "./server-settings.js";
+import { readServerSettings } from "./server-settings.js";
 const dataDir = resolve(process.env.DATA_DIR ?? "data");
 const passwordFile = join(dataDir, "admin-password.json");
 const serverSettingsFile = join(dataDir, "server-settings.json");
@@ -53,18 +49,10 @@ if (process.argv.includes("init-admin")) {
   const host = process.env.HOST ?? settings.bind_host;
   if (host !== "127.0.0.1" && host !== "0.0.0.0")
     throw new Error("HOST must be 127.0.0.1 or 0.0.0.0");
-  const origin =
-    process.env.PUBLIC_ORIGIN ??
-    settings.public_origin ??
-    "http://127.0.0.1:" + port;
-  if (!validOrigin(origin))
-    throw new Error(
-      "PUBLIC_ORIGIN must be an HTTP(S) origin without a trailing slash",
-    );
-  if (host === "0.0.0.0" && !isLoopbackOrigin(origin))
-    throw new Error(
-      "监听 0.0.0.0 对外开放时，PUBLIC_ORIGIN 必须填浏览器实际访问的地址（支持 HTTP，公网建议使用 HTTPS 反向代理）",
-    );
+  // 浏览器访问地址不再依赖硬编码或对外地址校验：同 Host 的请求一律视为同源。
+  // 这里只保留一个回退 origin 用于日志与 Cookie 默认值。
+  const displayHost = host === "0.0.0.0" ? "127.0.0.1" : host;
+  const origin = process.env.PUBLIC_ORIGIN ?? "http://" + displayHost + ":" + port;
   const { app } = await buildApp({
     databasePath: join(dataDir, "memory.sqlite"),
     passwordHash: stored.hash,

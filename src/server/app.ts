@@ -152,10 +152,10 @@ export async function buildApp(options: AppOptions) {
           try {
             const parsed = new URL(origin);
             const host = request.headers.host;
-            allowed =
-              ["127.0.0.1", "localhost", "[::1]", "::1"].includes(
-                parsed.hostname.toLowerCase(),
-              ) && (!host || parsed.host.toLowerCase() === host.toLowerCase());
+            // 同 Host 即同源：本机、局域网 IP、内网域名都放行；不再硬编码回环地址。
+            allowed = host
+              ? parsed.host.toLowerCase() === host.toLowerCase()
+              : parsed.origin === options.origin;
           } catch {
             allowed = false;
           }

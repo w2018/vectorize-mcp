@@ -19,9 +19,7 @@ import { tmpdir } from "node:os";
 import { WebdavCloud } from "./webdav.js";
 import { hashPassword } from "./password.js";
 import {
-  isLoopbackOrigin,
   readServerSettings,
-  validOrigin,
   writeServerSettings,
   type BindHost,
 } from "./server-settings.js";
@@ -145,7 +143,8 @@ export async function registerAdmin(
     header: string | undefined,
     host: string | undefined,
   ) => {
-    if (header === undefined || header === origin) return header !== undefined;
+    if (header === undefined) return false;
+    if (header === origin) return true;
     let parsed: URL;
     try {
       parsed = new URL(header);
@@ -153,9 +152,9 @@ export async function registerAdmin(
       return false;
     }
     if (parsed.origin === origin) return true;
-    if (!loopback(parsed.hostname)) return false;
-    if (!host) return true;
-    return parsed.host.toLowerCase() === host.toLowerCase();
+    // 同 Host（含局域网 IP、内网域名、反代域名）即视为同源；不再限制回环地址。
+    if (host) return parsed.host.toLowerCase() === host.toLowerCase();
+    return loopback(parsed.hostname);
   };
   const dropImport = (key: string) => {
     const entry = imports.get(key);
@@ -344,7 +343,6 @@ export async function registerAdmin(
     const saved = await readServerSettings(options.serverSettings.path);
     return {
       bind_host: options.serverSettings.bindHost,
-      public_origin: options.origin,
       port: options.serverSettings.port,
       saved,
       env_override: {
@@ -359,18 +357,8 @@ export async function registerAdmin(
     const bindHost = text(b.bind_host);
     if (bindHost !== "127.0.0.1" && bindHost !== "0.0.0.0")
       throw new DomainError("VALIDATION_ERROR");
-    const rawOrigin = b.public_origin;
-    const publicOrigin =
-      rawOrigin === undefined || rawOrigin === null || rawOrigin === ""
-        ? null
-        : text(rawOrigin);
-    if (publicOrigin !== null && !validOrigin(publicOrigin))
-      throw new DomainError("VALIDATION_ERROR");
-    if (bindHost === "0.0.0.0" && !publicOrigin)
-      throw new DomainError("VALIDATION_ERROR");
     await writeServerSettings(options.serverSettings.path, {
       bind_host: bindHost as BindHost,
-      public_origin: publicOrigin,
     });
     return {
       saved: true,

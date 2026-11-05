@@ -159,7 +159,7 @@ export function About() {
           <dt>作者</dt>
           <dd>w2018</dd>
           <dt>版本</dt>
-          <dd>{check?.current ?? "0.3.2"}</dd>
+          <dd>{check?.current ?? "0.3.4"}</dd>
           <dt>开源协议</dt>
           <dd>MIT</dd>
           <dt>开源地址</dt>

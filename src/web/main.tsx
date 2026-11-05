@@ -30,6 +30,7 @@ function App() {
   const [subject, setSubject] = useState("");
   const [refresh, setRefresh] = useState(0);
   const [password, setPassword] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
   const action = useAction();
   const accounts = useResource<Page<Account>>(
     authenticated ? "/accounts" : null,
@@ -75,6 +76,7 @@ function App() {
   const navigate = (next: string) => {
     scrollPositions.current.set(instanceKey, window.scrollY);
     setPage(next);
+    setMenuOpen(false);
   };
   const selectSubject = (next: string) => {
     scrollPositions.current.set(instanceKey, window.scrollY);
@@ -224,7 +226,13 @@ function App() {
   }
   return (
     <div className="app">
-      <aside className="sidebar">
+      <button
+        type="button"
+        className={menuOpen ? "sidebar-overlay open" : "sidebar-overlay"}
+        aria-label="关闭菜单"
+        onClick={() => setMenuOpen(false)}
+      />
+      <aside className={menuOpen ? "sidebar open" : "sidebar"}>
         <a
           className="brand"
           href="#"
@@ -262,6 +270,15 @@ function App() {
       </aside>
       <div className="main-wrap">
         <header className="topbar">
+          <button
+            type="button"
+            className="mobile-menu"
+            aria-label="打开菜单"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen(true)}
+          >
+            ☰
+          </button>
           <label className="account-select">
             当前账户
             <select
@@ -332,6 +349,11 @@ function App() {
     </div>
   );
 }
+const ua = typeof navigator === "undefined" ? "" : navigator.userAgent;
+const mobileUA =
+  /Android|iPhone|iPod|iPad|Mobile|Windows Phone|webOS|BlackBerry/i.test(ua) ||
+  (/Macintosh/i.test(ua) && (navigator.maxTouchPoints || 0) > 1);
+document.documentElement.dataset.mobile = mobileUA ? "true" : "false";
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <App />

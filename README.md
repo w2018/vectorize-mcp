@@ -10,6 +10,7 @@
 - **相似关系**：独立 `memory_similarity` 表按记忆 ID 自动关联高相似内容，检索时同一相似簇只返回一条代表，减少重复内容与模型阅读负担。
 - **存储**：单写多读 worker、有界队列、主业务库与独立观察日志库。
 - **后台**：记忆、画像、可回溯的 three.js 3D 星图、统计、回收站、设置、导入导出、本地备份与 WebDAV 云端备份、审计。账户即数据边界，不设额外空间层级。
+- **手机端**：按浏览器 UA 自动切换手机布局（抽屉导航、单列卡片、可滚动表格），PC 布局不变。
 - **QQBOT**：独立账户提供人物、概念、人设记忆与自定义关系；可配置人设、边界、五套预设，并通过 `w_memory_bootstrap` 读取受预算约束的启动上下文。
 
 ## 环境要求
@@ -55,12 +56,12 @@ Windows 与 Linux 行为一致：初始化只在本机保存 scrypt 哈希；已
 | --- | --- |
 | `DATA_DIR` | 数据目录，默认 `data`，建议使用固定绝对路径 |
 | `HOST` / `PORT` | 监听地址与端口，默认 `127.0.0.1:3100`；也可以在后台「设置 → 网络访问」切换（保存需重启） |
-| `PUBLIC_ORIGIN` | 浏览器实际访问的完整 origin，无末尾斜杠；对外开放时必填 |
+| `PUBLIC_ORIGIN` | 可选，仅用于日志与默认 Cookie origin；浏览器访问改为按请求 Host 自动同源判断，一般无需设置 |
 | `ADMIN_PASSWORD` | 仅用于 `npm run init-admin` |
 | `EMBEDDING_BASE_URL` / `EMBEDDING_MODEL` / `EMBEDDING_DIMENSION` | 可选编码器，三项同时设置或全部省略 |
 | `EMBEDDING_API_KEY` | 可选服务端编码器密钥，不通过后台返回 |
 
-远程访问需 HTTPS 反向代理，并把 `PUBLIC_ORIGIN` 设为该 HTTPS 地址。后端监听地址与公开 origin 是两个设置。
+远程访问只需把监听地址设为 `0.0.0.0`，同一局域网可直接用本机 IP 访问；不再要求填写对外 origin，也不强制 HTTPS。
 
 ## 管理员密码
 
@@ -69,7 +70,7 @@ Windows 与 Linux 行为一致：初始化只在本机保存 scrypt 哈希；已
 
 ## 监听地址
 
-「设置 → 网络访问」可选**仅本机（127.0.0.1）**或**对外开放（0.0.0.0）**。对外开放时须填写浏览器实际访问的完整地址，公网访问务必使用 HTTPS 反向代理；保存后重启服务生效。`HOST` / `PUBLIC_ORIGIN` 环境变量存在时优先生效，后台设置需清除环境变量后才接管。
+「设置 → 网络访问」只选**仅本机（127.0.0.1）**或**对外开放（0.0.0.0，局域网/公网可访问）**，不再填写对外地址、不做地址校验；保存后重启服务生效。`HOST` 环境变量存在时优先生效，后台设置需清除环境变量后才接管。
 
 ## 在线更新
 
@@ -109,7 +110,7 @@ HTTP 客户端填写 `http://127.0.0.1:3100/mcp`，并发送请求头 `Authoriza
 ```text
 data/
   admin-password.json          管理员密码哈希
-  server-settings.json         监听地址与对外 origin（后台「网络访问」保存）
+  server-settings.json         监听地址（后台「网络访问」保存）
   memory.sqlite                主数据库
   memory.sqlite.logs.sqlite    独立观察日志库
   memory.sqlite.trash.sqlite   回收站快照库

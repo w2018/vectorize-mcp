@@ -1468,3 +1468,242 @@ td button {
 .maintenance-row{display:flex;align-items:center;gap:12px;margin:0 0 16px}
 .maintenance-row button{width:auto;padding:8px 14px}
 .maintenance-row .muted{color:#9fb3bd;font-size:13px}
+
+/* 手机端：按 UA 自动切换（html[data-mobile="true"]），桌面端不受影响。 */
+.mobile-menu,
+.sidebar-overlay {
+  display: none;
+}
+html[data-mobile="true"] body {
+  -webkit-text-size-adjust: 100%;
+}
+html[data-mobile="true"] .app {
+  display: block;
+}
+html[data-mobile="true"] .sidebar {
+  position: fixed;
+  inset: 0 auto 0 0;
+  width: min(78vw, 300px);
+  padding: 20px 14px;
+  border-right: 1px solid #e2e8e2;
+  border-bottom: 0;
+  background: #fcfdfb;
+  transform: translateX(-105%);
+  transition: transform 0.24s ease;
+  z-index: 80;
+  overflow-y: auto;
+}
+html[data-mobile="true"] .sidebar.open {
+  transform: none;
+  box-shadow: 16px 0 40px #18372b30;
+}
+html[data-mobile="true"] .sidebar-overlay.open {
+  display: block;
+  position: fixed;
+  inset: 0;
+  background: #10251c55;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  z-index: 70;
+}
+html[data-mobile="true"] .mobile-menu {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  font-size: 20px;
+  line-height: 1;
+  flex: 0 0 auto;
+}
+html[data-mobile="true"] .brand {
+  padding: 0 8px 22px;
+}
+html[data-mobile="true"] .workspace-label {
+  display: block;
+  padding: 0 10px 10px;
+}
+html[data-mobile="true"] .sidebar-foot {
+  display: block;
+  padding: 20px 10px 0;
+}
+html[data-mobile="true"] nav {
+  flex-direction: column;
+  overflow: visible;
+  padding: 0;
+  gap: 4px;
+}
+html[data-mobile="true"] nav button {
+  white-space: normal;
+  font-size: 14px;
+  padding: 12px 14px;
+  gap: 12px;
+}
+html[data-mobile="true"] nav button span {
+  font-size: 19px;
+  width: 22px;
+}
+html[data-mobile="true"] .main-wrap {
+  margin: 0;
+  width: 100%;
+}
+html[data-mobile="true"] .topbar {
+  height: auto;
+  min-height: 60px;
+  padding: 8px 12px;
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  background: #fcfdfbf2;
+  backdrop-filter: blur(8px);
+  flex-wrap: wrap;
+  gap: 8px;
+}
+html[data-mobile="true"] .account-select {
+  flex: 1 1 150px;
+  min-width: 0;
+  gap: 6px;
+  font-size: 10px;
+}
+html[data-mobile="true"] .account-select select {
+  max-width: none;
+  width: 100%;
+  font-size: 12px;
+  padding: 8px;
+}
+html[data-mobile="true"] .toolbar {
+  margin-left: auto;
+  gap: 6px;
+}
+html[data-mobile="true"] .content {
+  padding: 18px 14px;
+  max-width: none;
+}
+html[data-mobile="true"] .page-heading {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+html[data-mobile="true"] .page-heading > button {
+  width: 100%;
+}
+html[data-mobile="true"] .padded {
+  padding: 16px;
+}
+html[data-mobile="true"] .filters {
+  flex-direction: column;
+  align-items: stretch;
+  padding: 12px;
+  gap: 8px;
+}
+html[data-mobile="true"] .filters label,
+html[data-mobile="true"] .filters select,
+html[data-mobile="true"] .filters input,
+html[data-mobile="true"] .filters .search {
+  width: 100%;
+  flex: none;
+}
+html[data-mobile="true"] .memory-card {
+  flex-direction: column;
+  padding: 16px;
+  gap: 10px;
+}
+html[data-mobile="true"] .memory-side {
+  min-width: 0;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  border-top: 1px dashed #e3ebe2;
+  padding-top: 10px;
+}
+html[data-mobile="true"] .memory-side strong {
+  font-size: 16px;
+  text-align: left;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+html[data-mobile="true"] .memory-side strong small {
+  display: inline;
+}
+html[data-mobile="true"] .memory-side button {
+  margin: 0;
+}
+html[data-mobile="true"] .row-actions {
+  justify-content: flex-start;
+}
+html[data-mobile="true"] .metric-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+html[data-mobile="true"] .metric {
+  padding: 14px;
+}
+html[data-mobile="true"] .metric strong {
+  font-size: 23px;
+}
+html[data-mobile="true"] .table-scroll {
+  -webkit-overflow-scrolling: touch;
+}
+html[data-mobile="true"] table {
+  min-width: 560px;
+}
+html[data-mobile="true"] .two-columns,
+html[data-mobile="true"] .settings-grid,
+html[data-mobile="true"] .form-grid {
+  grid-template-columns: 1fr;
+}
+html[data-mobile="true"] .inline-form {
+  flex-direction: column;
+  align-items: stretch;
+}
+html[data-mobile="true"] .inline-form label {
+  width: 100%;
+}
+html[data-mobile="true"] dialog {
+  width: calc(100vw - 20px);
+  max-width: calc(100vw - 20px);
+  max-height: 88vh;
+  padding: 18px;
+  margin: auto;
+}
+html[data-mobile="true"] .details {
+  grid-template-columns: 92px 1fr;
+  font-size: 12px;
+}
+html[data-mobile="true"] .graph-shell {
+  display: block;
+  height: auto;
+}
+html[data-mobile="true"] .graph-side {
+  margin-bottom: 10px;
+  max-height: none;
+}
+html[data-mobile="true"] .graph-stage {
+  height: 52vh;
+  min-height: 320px;
+}
+html[data-mobile="true"] .graph-detail {
+  position: static;
+  width: auto;
+  max-height: none;
+  margin-top: 10px;
+}
+html[data-mobile="true"] .page-foot {
+  padding: 12px 14px 20px;
+}
+html[data-mobile="true"] .login {
+  padding: 18px;
+}
+html[data-mobile="true"] .login-card {
+  padding: 24px 20px;
+  width: 100%;
+}
+html[data-mobile="true"] .login-card h1 {
+  font-size: 26px;
+}
