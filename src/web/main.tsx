@@ -1,9 +1,9 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { api, setCsrf, type Account, type Page } from "./api";
 import { Feedback, Heading, State, useAction, useResource } from "./ui";
 import { Memories } from "./memories";
-import { Accounts, Backups, Transfer, Settings, AuditLog } from "./management";
+import { Accounts, Backups, Settings, AuditLog } from "./management";
 import { GraphView, Stats, Suggestions } from "./insights";
 import "./style.css";
 import { Trash } from "./trash";
@@ -12,18 +12,17 @@ import { QQBot } from "./qqbot";
 const navigation = [
   ["stats", "▥", "统计面板"],
   ["memories", "▤", "记忆"],
-  ["profiles", "◉", "关于我"],
   ["graph", "✧", "记忆星图"],
   ["suggestions", "✓", "整理建议"],
   ["tokens", "⌘", "账户与凭据"],
-  ["transfer", "⇄", "数据搬家"],
-  ["backups", "◷", "备份"],
+  ["backups", "◷", "备份与数据"],
   ["settings", "⚙", "设置"],
   ["audit", "≡", "操作记录"],
   ["qqbot", "✦", "QQBOT 人设"],
   ["trash", "♲", "回收站"],
   ["about", "ⓘ", "关于"],
 ] as const;
+const scopedPages = ["memories", "graph", "stats", "suggestions"];
 function App() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
   const [sessionError, setSessionError] = useState("");
@@ -66,12 +65,54 @@ function App() {
       setSubject(accounts.data.items.some(a => a.id === remembered) ? remembered : accounts.data.items[0]?.id || "");
     }
   }, [accounts.data, subject]);
-  const activeAccount = accounts.data?.items.find(a => a.id === subject);
-  const kind = activeAccount?.kind || "standard";
+  const accountItems = accounts.data?.items || [];
+  const hasQQBot = accountItems.some((account) => account.kind === "qqbot");
+  const instanceKey = scopedPages.includes(page)
+    ? page + ":" + subject
+    : page;
+  const [mounted, setMounted] = useState<string[]>([]);
+  const scrollPositions = useRef(new Map<string, number>());
+  const navigate = (next: string) => {
+    scrollPositions.current.set(instanceKey, window.scrollY);
+    setPage(next);
+  };
+  const selectSubject = (next: string) => {
+    scrollPositions.current.set(instanceKey, window.scrollY);
+    setSubject(next);
+  };
   useEffect(() => {
-    if (kind !== "qqbot" && page === "qqbot") setPage("stats");
-    if (subject) { try { localStorage.setItem("vectorize.last-subject", subject); } catch { /* storage may be disabled */ } }
-  }, [kind, page, subject]);
+    if (subject) {
+      try {
+        localStorage.setItem("vectorize.last-subject", subject);
+      } catch {
+        /* storage may be disabled */
+      }
+    }
+    if (page === "qqbot" && accounts.data && !hasQQBot) setPage("stats");
+  }, [accounts.data, hasQQBot, page, subject]);
+  useEffect(() => {
+    if (scopedPages.includes(page) && !subject) return;
+    setMounted((current) =>
+      current.includes(instanceKey) ? current : [...current, instanceKey],
+    );
+  }, [instanceKey, page, subject]);
+  useEffect(() => {
+    if (!accounts.data) return;
+    const valid = new Set(accounts.data.items.map((account) => account.id));
+    setMounted((current) => {
+      const next = current.filter((key) => {
+        const separator = key.indexOf(":");
+        return separator < 0 || valid.has(key.slice(separator + 1));
+      });
+      return next.length === current.length ? current : next;
+    });
+  }, [accounts.data]);
+  useEffect(() => {
+    const frame = requestAnimationFrame(() =>
+      window.scrollTo({ top: scrollPositions.current.get(instanceKey) || 0 }),
+    );
+    return () => cancelAnimationFrame(frame);
+  }, [instanceKey]);
   const reload = () => setRefresh((v) => v + 1);
   useEffect(() => {
     const changed = () => setRefresh((v) => v + 1);
@@ -131,15 +172,56 @@ function App() {
         </section>
       </main>
     );
-  const scoped = [
-    "memories",
-    "profiles",
-    "graph",
-    "stats",
-    "suggestions",
-    "qqbot",
-    "transfer",
-  ].includes(page);
+  function renderPage(instance: string) {
+    const separator = instance.indexOf(":");
+    const name = separator < 0 ? instance : instance.slice(0, separator);
+    const pageSubject = separator < 0 ? "" : instance.slice(separator + 1);
+    const pageKind =
+      accountItems.find((account) => account.id === pageSubject)?.kind ||
+      "standard";
+    switch (name) {
+      case "memories":
+        return (
+          <Memories
+            subject={pageSubject}
+            accounts={accountItems}
+            refresh={refresh}
+          />
+        );
+      case "graph":
+        return (
+          <GraphView subject={pageSubject} refresh={refresh} kind={pageKind} />
+        );
+      case "stats":
+        return (
+          <Stats
+            subject={pageSubject}
+            refresh={refresh}
+            onSelectAccount={selectSubject}
+          />
+        );
+      case "suggestions":
+        return <Suggestions subject={pageSubject} refresh={refresh} />;
+      case "qqbot":
+        return (
+          <QQBot subject={subject} accounts={accountItems} refresh={refresh} />
+        );
+      case "tokens":
+        return <Accounts refresh={refresh} onChange={reload} />;
+      case "backups":
+        return <Backups subject={subject} refresh={refresh} />;
+      case "settings":
+        return <Settings refresh={refresh} />;
+      case "audit":
+        return <AuditLog refresh={refresh} />;
+      case "trash":
+        return <Trash refresh={refresh} />;
+      case "about":
+        return <About />;
+      default:
+        return null;
+    }
+  }
   return (
     <div className="app">
       <aside className="sidebar">
@@ -148,7 +230,7 @@ function App() {
           href="#"
           onClick={(e) => {
             e.preventDefault();
-            setPage("stats");
+            navigate("stats");
           }}
         >
           <span className="brandmark">✧</span>
@@ -160,12 +242,12 @@ function App() {
         <div className="workspace-label">我的工作空间</div>
         <nav aria-label="主导航">
           {navigation
-            .filter(([key]) => key !== "qqbot" || kind === "qqbot")
+            .filter(([key]) => key !== "qqbot" || hasQQBot)
             .map(([key, icon, label]) => (
             <button
               key={key}
               className={page === key ? "active" : ""}
-              onClick={() => setPage(key)}
+              onClick={() => navigate(key)}
               aria-current={page === key ? "page" : undefined}
             >
               <span>{icon}</span>
@@ -185,7 +267,7 @@ function App() {
             <select
               aria-label="当前记忆账户"
               value={subject}
-              onChange={(e) => setSubject(e.target.value)}
+              onChange={(e) => selectSubject(e.target.value)}
               disabled={accounts.loading}
             >
               <option value="">
@@ -220,60 +302,27 @@ function App() {
         </header>
         <main className="content">
           <Feedback error={action.error || accounts.error} notice="" />
-          {scoped && !subject ? (
+          {scopedPages.includes(page) && !subject ? (
             <>
               <Heading
                 eyebrow="WELCOME"
                 title="从一个记忆账户开始"
                 description="不同账户的记忆彼此隔离。创建访问凭据时，会自动建立一个新账户。"
               />
-              <button className="primary" onClick={() => setPage("tokens")}>
+              <button className="primary" onClick={() => navigate("tokens")}>
                 创建第一个账户
               </button>
             </>
           ) : (
-            <React.Fragment key={scoped ? page + subject : page}>
-              {page === "memories" && (
-                <Memories
-                  subject={subject}
-                  accounts={accounts.data?.items || []}
-                  refresh={refresh}
-                />
-              )}
-              {page === "profiles" && (
-                <Memories
-                  subject={subject}
-                  accounts={accounts.data?.items || []}
-                  refresh={refresh}
-                  profiles
-                />
-              )}
-              {page === "graph" && (
-                <GraphView subject={subject} refresh={refresh} kind={kind} />
-              )}
-              {page === "stats" && (
-                <Stats
-                  subject={subject}
-                  refresh={refresh}
-                  onSelectAccount={setSubject}
-                />
-              )}
-              {page === "qqbot" && kind === "qqbot" && (
-                <QQBot subject={subject} refresh={refresh} />
-              )}
-              {page === "suggestions" && (
-                <Suggestions subject={subject} refresh={refresh} />
-              )}
-              {page === "tokens" && (
-                <Accounts refresh={refresh} onChange={reload} />
-              )}
-              {page === "transfer" && <Transfer subject={subject} />}
-              {page === "backups" && <Backups refresh={refresh} />}
-              {page === "settings" && <Settings refresh={refresh} />}
-              {page === "audit" && <AuditLog refresh={refresh} />}
-              {page === "trash" && <Trash refresh={refresh} />}
-              {page === "about" && <About />}
-            </React.Fragment>
+            mounted.map((instance) => (
+              <div
+                className="page-instance"
+                key={instance}
+                hidden={instance !== instanceKey}
+              >
+                {renderPage(instance)}
+              </div>
+            ))
           )}
         </main>
         <footer className="page-foot">

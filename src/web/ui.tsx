@@ -171,18 +171,21 @@ export function ConfirmDialog({
   onClose,
   disabled = false,
   confirmLabel = "确认执行",
+  verificationCode,
 }: {
   title: string;
   children?: ReactNode;
-  onConfirm: () => Promise<unknown>;
+  onConfirm: (code?: string) => Promise<unknown>;
   onClose: () => void;
   disabled?: boolean;
   confirmLabel?: string;
+  verificationCode?: string;
 }) {
   const [state, setState] = useState<
     "confirm" | "busy" | "success" | "error" | "cancelled"
   >("confirm");
   const [error, setError] = useState("");
+  const [verificationInput, setVerificationInput] = useState("");
   const lock = useRef(false);
   function cancel() {
     if (!lock.current) setState("cancelled");
@@ -193,7 +196,7 @@ export function ConfirmDialog({
     setState("busy");
     setError("");
     try {
-      await onConfirm();
+      await onConfirm(verificationCode ? verificationInput : undefined);
       setState("success");
     } catch (e) {
       setError(errorText(e));
@@ -223,6 +226,41 @@ export function ConfirmDialog({
         ) : (
           <>
             {children}
+            {verificationCode && (
+              <>
+                <label>
+                  本次验证码（5 分钟内有效）
+                  <code
+                    aria-label="删除验证码"
+                    style={{
+                      display: "inline-block",
+                      padding: "6px 14px",
+                      fontSize: 22,
+                      letterSpacing: 6,
+                      fontWeight: 700,
+                      alignSelf: "flex-start",
+                    }}
+                  >
+                    {verificationCode}
+                  </code>
+                </label>
+                <label>
+                  输入验证码
+                  <input
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={verificationInput}
+                    autoFocus
+                    placeholder="输入上方 6 位数字"
+                    onChange={(event) =>
+                      setVerificationInput(
+                        event.target.value.replace(/\D/g, "").slice(0, 6),
+                      )
+                    }
+                  />
+                </label>
+              </>
+            )}
             {state === "error" && (
               <div className="notice error" role="alert">
                 {error}
@@ -247,7 +285,11 @@ export function ConfirmDialog({
               </button>
               <button
                 className="danger"
-                disabled={disabled || state === "busy"}
+                disabled={
+                  disabled ||
+                  state === "busy" ||
+                  (!!verificationCode && verificationInput.length !== 6)
+                }
                 onClick={() => void execute()}
               >
                 {state === "busy"

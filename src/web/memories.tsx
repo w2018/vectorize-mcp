@@ -27,18 +27,14 @@ export function MemoryEditor({
   memory,
   onClose,
   onSaved,
-  profile = false,
 }: {
   subject: string;
   accounts: Account[];
   memory?: Memory;
   onClose: () => void;
   onSaved: () => void;
-  profile?: boolean;
 }) {
-  const [type, setType] = useState<MemoryType>(
-    memory?.type || (profile ? "profile" : "fact"),
-  );
+  const [type, setType] = useState<MemoryType>(memory?.type || "fact");
   const [account, setAccount] = useState(subject);
   const [peek, setPeek] = useState<Memory | null>(null);
   const sameType = useResource<Page<Memory>>(
@@ -348,12 +344,10 @@ export function Memories({
   subject,
   accounts,
   refresh,
-  profiles = false,
 }: {
   subject: string;
   accounts: Account[];
   refresh: number;
-  profiles?: boolean;
 }) {
   const [version, setVersion] = useState(0);
   const [search, setSearch] = useState("");
@@ -376,11 +370,11 @@ export function Memories({
   const [restoreMemory, setRestoreMemory] = useState<Memory | null>(null);
   const action = useAction();
   const records = useResource<Page<Memory>>(
-    (profiles ? "/profiles" : "/memories") +
+    "/memories" +
       query({
         subject_id: subject,
         q: search,
-        type: profiles ? "profile" : type,
+        type,
         status,
         cursor,
         limit: 20,
@@ -424,16 +418,12 @@ export function Memories({
   return (
     <>
       <Heading
-        eyebrow={profiles ? "ABOUT YOU" : "YOUR MEMORY"}
-        title={profiles ? "关于我" : "记忆"}
-        description={
-          profiles
-            ? "你告诉我的，和仍待你确认的。随时纠正，保持真实。"
-            : "把值得记住的事收在一起，需要时再找到。管理浏览不会增加被找到次数。"
-        }
+        eyebrow="YOUR MEMORY"
+        title="记忆"
+        description="把值得记住的事收在一起，需要时再找到。管理浏览不会增加被找到次数。"
       >
         <button className="primary" onClick={() => setEditing(null)}>
-          ＋ {profiles ? "添加画像" : "新建记忆"}
+          ＋ 新建记忆
         </button>
       </Heading>
       <Feedback error={action.error} notice={action.notice} />
@@ -451,23 +441,21 @@ export function Memories({
               }}
             />
           </label>
-          {!profiles && (
-            <select
-              aria-label="类型"
-              value={type}
-              onChange={(e) => {
-                setType(e.target.value);
-                setCursor("");
-              }}
-            >
-              <option value="">全部类型</option>
-              {Object.entries(types).map(([k, v]) => (
-                <option key={k} value={k}>
-                  {v}
-                </option>
-              ))}
-            </select>
-          )}
+          <select
+            aria-label="类型"
+            value={type}
+            onChange={(e) => {
+              setType(e.target.value);
+              setCursor("");
+            }}
+          >
+            <option value="">全部类型</option>
+            {Object.entries(types).map(([k, v]) => (
+              <option key={k} value={k}>
+                {v}
+              </option>
+            ))}
+          </select>
           <select
             aria-label="记忆状态"
             value={status}
@@ -523,7 +511,16 @@ export function Memories({
                     <small>重要程度</small>
                   </strong>
                   <span>找到 {m.retrieval_count} 次</span>
-                  <button onClick={() => setEditing(m)}>编辑</button>
+                  <div className="row-actions">
+                    <button onClick={() => setEditing(m)}>编辑</button>
+                    <button
+                      className="danger-outline"
+                      disabled={action.busy}
+                      onClick={() => prepare(m, "delete")}
+                    >
+                      删除…
+                    </button>
+                  </div>
                 </div>
               </article>
             ))}
@@ -551,7 +548,6 @@ export function Memories({
           subject={subject}
           accounts={accounts}
           memory={editing || undefined}
-          profile={profiles}
           onClose={() => setEditing(undefined)}
           onSaved={reload}
         />
@@ -692,14 +688,23 @@ export function Memories({
       {preview && (
         <ConfirmDialog
           title={preview.title}
+          confirmLabel={
+            preview.path === "/memories/delete" ? "确认删除" : "确认执行"
+          }
+          verificationCode={
+            preview.path === "/memories/delete"
+              ? String(preview.value.code || "")
+              : undefined
+          }
           onClose={() => setPreview(null)}
-          onConfirm={async () => {
+          onConfirm={async (code) => {
             await api(
               preview.path,
               "POST",
               writeBody({
                 ...preview.body,
                 preview_token: preview.value.preview_token,
+                ...(code ? { code } : {}),
               }),
             );
             reload();

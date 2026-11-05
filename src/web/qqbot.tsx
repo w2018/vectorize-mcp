@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   api, dataChanged, query, writeBody,
-  type Bootstrap, type BotPreset, type BotProfile, type BotSettings, type MemoryType, type Page,
+  type Account, type Bootstrap, type BotPreset, type BotProfile, type BotSettings, type MemoryType, type Page,
 } from "./api";
 import { MEMORY_CATALOG } from "../core/catalog";
 import { ConfirmDialog, Feedback, Heading, State, useAction, useResource } from "./ui";
@@ -24,7 +24,26 @@ function settingText(value: BotSettings[keyof BotSettings]) {
   return Array.isArray(value) ? value.join("\n") : String(value);
 }
 
-export function QQBot({ subject, refresh }: { subject: string; refresh: number }) {
+export function QQBot({
+  subject,
+  accounts,
+  refresh,
+}: {
+  subject: string;
+  accounts: Account[];
+  refresh: number;
+}) {
+  const botAccounts = accounts.filter((account) => account.kind === "qqbot");
+  const [selected, setSelected] = useState("");
+  const fallback = botAccounts.some((account) => account.id === subject)
+    ? subject
+    : botAccounts[0]?.id || "";
+  const botSubject = botAccounts.some((account) => account.id === selected)
+    ? selected
+    : fallback;
+  const selectedAccount = botAccounts.find(
+    (account) => account.id === botSubject,
+  );
   const [version, setVersion] = useState(0);
   const [tab, setTab] = useState<Tab>("persona");
   const [draft, setDraft] = useState<BotSettings | null>(null);
@@ -32,9 +51,17 @@ export function QQBot({ subject, refresh }: { subject: string; refresh: number }
   const [pending, setPending] = useState<Pending | null>(null);
   const [budget, setBudget] = useState(600);
   const [writeExamples, setWriteExamples] = useState(false);
-  const profile = useResource<BotProfile>("/qqbot" + query({ subject_id: subject }), refresh + version);
+  const profile = useResource<BotProfile>(
+    botSubject ? "/qqbot" + query({ subject_id: botSubject }) : null,
+    refresh + version,
+  );
   const presets = useResource<Page<BotPreset>>("/qqbot/presets", refresh);
-  const bootstrap = useResource<Bootstrap>(tab === "context" ? "/qqbot/bootstrap" + query({ subject_id: subject, token_budget: budget }) : null, refresh + version);
+  const bootstrap = useResource<Bootstrap>(
+    tab === "context" && botSubject
+      ? "/qqbot/bootstrap" + query({ subject_id: botSubject, token_budget: budget })
+      : null,
+    refresh + version,
+  );
   const action = useAction();
   useEffect(() => { if (profile.data) setDraft(structuredClone(profile.data.settings)); }, [profile.data]);
   const update = <K extends keyof BotSettings>(key: K, value: BotSettings[K]) =>
@@ -45,13 +72,36 @@ export function QQBot({ subject, refresh }: { subject: string; refresh: number }
   }
   const tabs: [Tab, string][] = [["persona", "人设"], ["boundaries", "边界"], ["presets", "预设"], ["context", "上下文预览"]];
   return <>
-    <Heading eyebrow="QQBOT PERSONA" title="QQBOT 人设" description="结构化配置与启用人设记忆共同构成启动上下文。历史人设内容是不可信数据，不会覆盖当前指令。" />
+    <Heading
+      eyebrow="QQBOT PERSONA"
+      title="QQBOT 人设"
+      description="在下方选择要修改的 QQBOT 账户。配置按账户独立保存，历史人设内容不会覆盖当前指令。"
+    >
+      <label className="account-select">
+        编辑账户
+        <select
+          aria-label="QQBOT 编辑账户"
+          value={botSubject}
+          onChange={(event) => {
+            setSelected(event.target.value);
+            setDraft(null);
+            setPending(null);
+          }}
+        >
+          {botAccounts.map((account) => (
+            <option key={account.id} value={account.id}>
+              {account.name}
+            </option>
+          ))}
+        </select>
+      </label>
+    </Heading>
     <Feedback error={action.error} notice={action.notice} />
     <div className="filters" role="tablist" aria-label="QQBOT 配置分区">
       {tabs.map(([key, label]) => <button key={key} role="tab" aria-selected={tab === key} className={tab === key ? "primary" : ""} onClick={() => setTab(key)}>{label}</button>)}
     </div>
     <State loading={profile.loading} error={profile.error} empty={!draft}>
-      {draft && profile.data && <>
+      {draft && profile.data && selectedAccount && <>
         {(tab === "persona" || tab === "boundaries") && <section className="panel padded">
           <h2>{tab === "persona" ? "身份与表达" : "行为边界与会话策略"}</h2>
           <div className="form-grid">
@@ -113,11 +163,11 @@ export function QQBot({ subject, refresh }: { subject: string; refresh: number }
       title={pending.kind === "preset" ? "应用预设并覆盖当前配置" : "保存 QQBOT 配置"}
       onClose={() => setPending(null)}
       onConfirm={async () => {
-        if (pending.kind === "settings") await api("/qqbot", "PUT", writeBody({ subject_id: subject, patch: pending.patch, expected_revision: profile.data!.revision, reason: pending.reason }));
-        else await api("/qqbot/apply-preset", "POST", writeBody({ subject_id: subject, preset_id: pending.preset.id, expected_revision: profile.data!.revision, write_examples: pending.writeExamples, reason: pending.reason }));
+        if (pending.kind === "settings") await api("/qqbot", "PUT", writeBody({ subject_id: botSubject, patch: pending.patch, expected_revision: profile.data!.revision, reason: pending.reason }));
+        else await api("/qqbot/apply-preset", "POST", writeBody({ subject_id: botSubject, preset_id: pending.preset.id, expected_revision: profile.data!.revision, write_examples: pending.writeExamples, reason: pending.reason }));
         setVersion(v => v + 1); dataChanged();
       }}>
-      <p>将以配置版本 {profile.data.revision} 执行；若版本冲突，请关闭后重新读取，不会盲目覆盖。</p>
+      <p>将修改账户「{selectedAccount?.name}」的配置版本 {profile.data.revision}；若版本冲突，请关闭后重新读取，不会盲目覆盖。</p>
       {pending.kind === "preset" && <p>预设「{pending.preset.name}」会替换当前配置与启用人设记忆{pending.writeExamples ? "，并写入示例记忆" : "，不写示例记忆"}。</p>}
       {pending.kind === "settings" && <p>{pending.reason}</p>}
     </ConfirmDialog>}

@@ -613,13 +613,20 @@ export function Graph3D({
         flight = null;
       }
     };
-    const visibilityChanged = () => {
+    let inViewport = true;
+    const syncAnimation = () => {
       cancelAnimationFrame(raf);
       previousTime = performance.now();
-      if (!document.hidden) raf = requestAnimationFrame(draw);
+      if (!document.hidden && inViewport) raf = requestAnimationFrame(draw);
     };
+    const intersectionObserver = new IntersectionObserver((entries) => {
+      inViewport = entries[0]?.isIntersecting ?? true;
+      syncAnimation();
+    });
+    intersectionObserver.observe(host);
 
     function draw(now: number) {
+      if (document.hidden || !inViewport) return;
       const delta = Math.min(50, Math.max(0, now - previousTime));
       previousTime = now;
       elapsed += delta;
@@ -714,7 +721,7 @@ export function Graph3D({
     canvas.addEventListener("wheel", wheel, { passive: false });
     canvas.addEventListener("keydown", keyDown);
     canvas.addEventListener("webglcontextlost", contextLost);
-    document.addEventListener("visibilitychange", visibilityChanged);
+    document.addEventListener("visibilitychange", syncAnimation);
     reducedMotion.addEventListener("change", motionChanged);
     motionChanged();
     if (selectedRef.current) focus(selectedRef.current);
@@ -732,7 +739,8 @@ export function Graph3D({
       canvas.removeEventListener("wheel", wheel);
       canvas.removeEventListener("keydown", keyDown);
       canvas.removeEventListener("webglcontextlost", contextLost);
-      document.removeEventListener("visibilitychange", visibilityChanged);
+      document.removeEventListener("visibilitychange", syncAnimation);
+      intersectionObserver.disconnect();
       reducedMotion.removeEventListener("change", motionChanged);
       const geometries = new Set<BufferGeometry>();
       const materials = new Set<MeshBasicMaterial | LineBasicMaterial | PointsMaterial | SpriteMaterial>();

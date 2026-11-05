@@ -316,17 +316,55 @@ export async function registerAdmin(
   route("POST", "/trash/delete", async (req) =>
     write("deleteTrash", trashIds(body(req).ids)),
   );
+  const memoryDeletions = new Map<
+    string,
+    { code: string; session: string; expires: number; attempts: number }
+  >();
   route("POST", "/memories/delete-preview", async (req) => {
     const b = body(req);
-    return write("deletePreview", subject(b), versionRefs(b.items), text(b.reason));
+    const preview = await write<RecordData>(
+      "deletePreview",
+      subject(b),
+      versionRefs(b.items),
+      text(b.reason),
+    );
+    const code = String(randomInt(0, 1000000)).padStart(6, "0");
+    const expires = Date.now() + 300000;
+    for (const [key, entry] of memoryDeletions)
+      if (entry.expires < Date.now()) memoryDeletions.delete(key);
+    memoryDeletions.set(String(preview.preview_token), {
+      code,
+      session: current(req)!.id,
+      expires,
+      attempts: 0,
+    });
+    return { ...preview, code, expires_at: expires };
   });
   route("POST", "/memories/delete", async (req) => {
     const b = body(req);
-    return write("deleteToTrash", subject(b), {
+    const previewToken = text(b.preview_token);
+    const entry = memoryDeletions.get(previewToken);
+    if (
+      !entry ||
+      entry.session !== current(req)!.id ||
+      entry.expires < Date.now() ||
+      entry.attempts >= 5
+    ) {
+      memoryDeletions.delete(previewToken);
+      throw new DomainError("PREVIEW_EXPIRED", "验证码已失效，请重新获取");
+    }
+    entry.attempts++;
+    const given = Buffer.from(text(b.code));
+    const expected = Buffer.from(entry.code);
+    if (given.length !== expected.length || !timingSafeEqual(given, expected))
+      throw new DomainError("FORBIDDEN", "验证码不正确");
+    const result = await write("deleteToTrash", subject(b), {
       items: versionRefs(b.items),
       reason: text(b.reason),
-      preview_token: text(b.preview_token),
+      preview_token: previewToken,
     });
+    memoryDeletions.delete(previewToken);
+    return result;
   });
   route("POST", "/tokens/:id/delete-preview", async (req) =>
     write("deleteRevokedTokenPreview", param(req)),
@@ -988,7 +1026,18 @@ export async function registerAdmin(
     const q = query(req),
       start = offset(q.cursor),
       limit = integer(q.limit, 50, 100);
-    const rows = await read<RecordData[]>("operationLogs", limit + 1, start);
+    const rows = await read<RecordData[]>("operationLogs", limit + 1, start, {
+      action: q.action ? text(q.action) : undefined,
+      actor: q.actor ? text(q.actor) : undefined,
+      from:
+        q.from === undefined || q.from === ""
+          ? undefined
+          : integer(q.from, 1, Number.MAX_SAFE_INTEGER),
+      to:
+        q.to === undefined || q.to === ""
+          ? undefined
+          : integer(q.to, 1, Number.MAX_SAFE_INTEGER),
+    });
     return {
       items: rows.slice(0, limit).map((r) => ({
         ...r,

@@ -120,12 +120,16 @@ export class Store {
   private db: Database.Database;
   private logs?: Database.Database;
   private trash?: TrashVault;
+  private readonly trashPath: string;
   private readonlyMode: boolean;
   constructor(
     public readonly path: string,
     options: { readonly?: boolean; logPath?: string; trashPath?: string } = {},
   ) {
     this.readonlyMode = !!options.readonly;
+    this.trashPath =
+      options.trashPath ??
+      (path === ":memory:" ? ":memory:" : path + ".trash.sqlite");
     if (path !== ":memory:" && !options.readonly)
       mkdirSync(dirname(resolve(path)), { recursive: true });
     this.db = this.open(path, !!options.readonly);
@@ -162,21 +166,14 @@ export class Store {
       this.logs.exec(
         "CREATE TABLE IF NOT EXISTS observations(id TEXT PRIMARY KEY,event TEXT,payload TEXT,created_at INTEGER)",
       );
-      this.trash = new TrashVault(
-        options.trashPath ??
-          (path === ":memory:" ? ":memory:" : path + ".trash.sqlite"),
-      );
+      this.trash = new TrashVault(this.trashPath);
       this.trash.reconcile((kind, targetId) =>
         kind === "memory"
           ? !!this.row("SELECT id FROM memories WHERE id=?", targetId)
           : !!this.row("SELECT id FROM tokens WHERE id=?", targetId),
       );
-    } else {
-      const tp =
-        options.trashPath ??
-        (path === ":memory:" ? ":memory:" : path + ".trash.sqlite");
-      if (tp === ":memory:" || existsSync(tp))
-        this.trash = new TrashVault(tp, true);
+    } else if (this.trashPath === ":memory:" || existsSync(this.trashPath)) {
+      this.trash = new TrashVault(this.trashPath, true);
     }
   }
   private open(path: string, readonly = false) {
@@ -235,9 +232,34 @@ export class Store {
     }
     return { delivered: rows.length };
   }
-  operationLogs(limit = 100, offset = 0) {
+  operationLogs(
+    limit = 100,
+    offset = 0,
+    filters: { action?: string; actor?: string; from?: number; to?: number } = {},
+  ) {
+    const where: string[] = [];
+    const args: unknown[] = [];
+    if (filters.action) {
+      where.push("action LIKE ?");
+      args.push("%" + filters.action + "%");
+    }
+    if (filters.actor) {
+      where.push("actor LIKE ?");
+      args.push("%" + filters.actor + "%");
+    }
+    if (filters.from !== undefined) {
+      where.push("created_at >= ?");
+      args.push(filters.from);
+    }
+    if (filters.to !== undefined) {
+      where.push("created_at <= ?");
+      args.push(filters.to);
+    }
     return this.rows(
-      "SELECT * FROM audit ORDER BY created_at DESC,id LIMIT ? OFFSET ?",
+      "SELECT * FROM audit" +
+        (where.length ? " WHERE " + where.join(" AND ") : "") +
+        " ORDER BY created_at DESC,id LIMIT ? OFFSET ?",
+      ...args,
       Math.min(500, limit),
       Math.max(0, offset),
     );
@@ -858,6 +880,10 @@ export class Store {
     });
   }
   private trashVault(): TrashVault {
+    if (!this.trash && this.readonlyMode) {
+      if (this.trashPath === ":memory:" || existsSync(this.trashPath))
+        this.trash = new TrashVault(this.trashPath, true);
+    }
     check(this.trash, "DATABASE_UNAVAILABLE");
     return this.trash!;
   }

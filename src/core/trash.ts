@@ -110,7 +110,7 @@ export class TrashVault {
   }
   reconcile(sourceExists: (kind: TrashKind, targetId: string) => boolean) {
     const rows = this.db
-      .prepare("SELECT id,kind,target_id,state FROM trash WHERE state='pending'")
+      .prepare("SELECT id,kind,target_id,state FROM trash")
       .all() as Record<string, unknown>[];
     for (const row of rows) {
       const exists = sourceExists(

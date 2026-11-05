@@ -760,11 +760,10 @@ export function Transfer({ subject }: { subject: string }) {
   const [preview, setPreview] = useState<Preview | null>(null);
   return (
     <>
-      <Heading
-        eyebrow="MOVE YOUR DATA"
-        title="数据搬家"
-        description="用版本化 JSON 保存和迁移记忆。导入先检查，不会直接覆盖现有内容。"
-      />
+      <div className="section-head">
+        <h2>账户数据导入导出</h2>
+        <p>用版本化 JSON 迁移当前账户；导入先预检，不直接覆盖。</p>
+      </div>
       <Feedback error={action.error} notice={action.notice} />
       <div className="two-columns">
         <section className="panel padded">
@@ -877,7 +876,13 @@ export function Transfer({ subject }: { subject: string }) {
     </>
   );
 }
-export function Backups({ refresh }: { refresh: number }) {
+export function Backups({
+  refresh,
+  subject,
+}: {
+  refresh: number;
+  subject: string;
+}) {
   const [version, setVersion] = useState(0);
   const backups = useResource<Page<Backup>>("/backups", refresh + version);
   const action = useAction();
@@ -949,7 +954,7 @@ export function Backups({ refresh }: { refresh: number }) {
     <>
       <Heading
         eyebrow="RECOVERY"
-        title="备份与恢复"
+        title="备份与数据"
         description="备份是整个数据库的一致性快照，与单账户的数据导出不同。本地备份留在服务器，云端备份可以多存一份到 WebDAV。"
       >
         <button
@@ -1223,6 +1228,14 @@ export function Backups({ refresh }: { refresh: number }) {
           </div>
         )}
       </section>
+      {subject ? (
+        <Transfer key={subject} subject={subject} />
+      ) : (
+        <section className="panel padded">
+          <h2>账户数据导入导出</h2>
+          <p>请先在顶部选择一个账户，再导出或导入该账户的记忆。</p>
+        </section>
+      )}
       {cloudRemoving && (
         <CloudDeleteDialog
           file={cloudRemoving}
@@ -1684,20 +1697,102 @@ export function Settings({ refresh }: { refresh: number }) {
     </>
   );
 }
+type AuditFilters = {
+  action: string;
+  actor: string;
+  from: string;
+  to: string;
+};
+const emptyAuditFilters: AuditFilters = {
+  action: "",
+  actor: "",
+  from: "",
+  to: "",
+};
 export function AuditLog({ refresh }: { refresh: number }) {
   const [cursor, setCursor] = useState("");
+  const [draft, setDraft] = useState<AuditFilters>(emptyAuditFilters);
+  const [applied, setApplied] = useState<AuditFilters>(emptyAuditFilters);
+  const from = applied.from ? new Date(applied.from).getTime() : undefined;
+  const to = applied.to ? new Date(applied.to).getTime() + 59999 : undefined;
   const logs = useResource<Page<Audit>>(
-    "/audit" + query({ cursor, limit: 50 }),
+    "/audit" +
+      query({
+        cursor,
+        limit: 50,
+        action: applied.action,
+        actor: applied.actor,
+        from,
+        to,
+      }),
     refresh,
   );
+  const update = (key: keyof AuditFilters, value: string) =>
+    setDraft((current) => ({ ...current, [key]: value }));
   return (
     <>
       <Heading
         eyebrow="HISTORY"
         title="操作记录"
-        description="查看谁在什么时间进行了修改。审计记录不展示访问密钥。"
+        description="按操作、操作者或时间筛选修改历史。审计记录不展示访问密钥。"
       />
       <section className="panel padded">
+        <form
+          className="filters audit-filters"
+          onSubmit={(event) => {
+            event.preventDefault();
+            setCursor("");
+            setApplied(draft);
+          }}
+        >
+          <label>
+            操作
+            <input
+              aria-label="筛选操作"
+              placeholder="例如 memory_add"
+              value={draft.action}
+              onChange={(event) => update("action", event.target.value)}
+            />
+          </label>
+          <label>
+            操作者
+            <input
+              aria-label="筛选操作者"
+              placeholder="例如 admin"
+              value={draft.actor}
+              onChange={(event) => update("actor", event.target.value)}
+            />
+          </label>
+          <label>
+            开始时间
+            <input
+              type="datetime-local"
+              value={draft.from}
+              onChange={(event) => update("from", event.target.value)}
+            />
+          </label>
+          <label>
+            结束时间
+            <input
+              type="datetime-local"
+              value={draft.to}
+              onChange={(event) => update("to", event.target.value)}
+            />
+          </label>
+          <button className="primary" type="submit">
+            查询
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setDraft(emptyAuditFilters);
+              setApplied(emptyAuditFilters);
+              setCursor("");
+            }}
+          >
+            清除筛选
+          </button>
+        </form>
         <State
           loading={logs.loading}
           error={logs.error}
