@@ -620,6 +620,23 @@ export async function registerAdmin(
         : integer(q.token_budget, 600, 1200),
     );
   });
+  route("GET", "/memories/:id/similar", async (req) =>
+    read("relatedSimilarity", subject(query(req)), param(req)),
+  );
+  route("POST", "/maintenance/similarity", async (req) => {
+    const b = body(req);
+    let threshold: number | undefined;
+    if (b.threshold !== undefined && b.threshold !== "") {
+      threshold = Number(b.threshold);
+      if (!Number.isFinite(threshold) || threshold < 0.3 || threshold > 0.95)
+        throw new DomainError("VALIDATION_ERROR");
+    }
+    return write("rebuildSimilarity", subject(b), {
+      threshold,
+      neighbors:
+        b.neighbors === undefined ? undefined : integer(b.neighbors, 5, 20),
+    });
+  });
   for (const path of ["/memories", "/profiles"])
     route("GET", path, async (req) => {
       const q = query(req),

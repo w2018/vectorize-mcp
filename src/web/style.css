@@ -1457,3 +1457,14 @@ td button {
   font-size: 13px;
   line-height: 1.8;
 }
+
+.similar-block{margin:14px 0;padding:10px 12px;border:1px solid #2a3b45;border-radius:8px;background:rgba(102,230,208,.04)}
+.similar-block h4{margin:0 0 8px;font-size:13px;font-weight:600;color:#9fb3bd}
+.similar-block ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.similar-block li{display:flex;align-items:center;gap:8px;font-size:13px}
+.similar-block .similar-text{flex:1;color:#d7e3e8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.similar-block .similar-score{color:#66e6d0;font-variant-numeric:tabular-nums}
+
+.maintenance-row{display:flex;align-items:center;gap:12px;margin:0 0 16px}
+.maintenance-row button{width:auto;padding:8px 14px}
+.maintenance-row .muted{color:#9fb3bd;font-size:13px}

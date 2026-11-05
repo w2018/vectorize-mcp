@@ -126,11 +126,22 @@ export class Store {
   private readonly trashPath: string;
   private readonlyMode: boolean;
   private secretKeyCache?: Buffer;
+  private readonly autoLink: boolean;
+  private readonly featureCache = new Map<
+    string,
+    { revision: number; features: Set<string> }
+  >();
   constructor(
     public readonly path: string,
-    options: { readonly?: boolean; logPath?: string; trashPath?: string } = {},
+    options: {
+      readonly?: boolean;
+      logPath?: string;
+      trashPath?: string;
+      autoLink?: boolean;
+    } = {},
   ) {
     this.readonlyMode = !!options.readonly;
+    this.autoLink = options.autoLink !== false;
     this.trashPath =
       options.trashPath ??
       (path === ":memory:" ? ":memory:" : path + ".trash.sqlite");
@@ -1919,6 +1930,7 @@ export class Store {
       };
       this.profileSlot(m);
       this.save(m);
+      this.linkSimilar(ctx.subjectId, m.id);
       return {
         data: {
           status: "created",
@@ -1976,6 +1988,14 @@ export class Store {
         this.db
           .prepare("UPDATE vectors SET revision=? WHERE memory_id=?")
           .run(next.revision, m.id);
+      if (this.autoLink) {
+        this.db
+          .prepare(
+            "DELETE FROM memory_similarity WHERE status='auto' AND (source_id=? OR target_id=?)",
+          )
+          .run(m.id, m.id);
+        this.linkSimilar(ctx.subjectId, m.id);
+      }
       return {
         data: {
           id: next.id,
@@ -2290,6 +2310,220 @@ export class Store {
       };
     });
   }
+  /** 记忆检索用的字符 bigram 特征；只在内存里算一次，按 revision 失效。 */
+  private featuresOf(m: Memory): Set<string> {
+    const cached = this.featureCache.get(m.id);
+    if (cached && cached.revision === m.revision) return cached.features;
+    const raw = [m.title, m.content, ...m.keywords].join(" ").toLowerCase();
+    const features = new Set<string>();
+    // 中文按相邻二字（bigram）切分，拉丁字母/数字按整词切分。这样 "tea fact one"
+    // 与 "tea fact two" 只有 2/4 个词重合，不会被误判为同一条记忆。
+    for (const match of raw.matchAll(/[\p{Script=Han}]+|[\p{L}\p{N}]+/gu)) {
+      const run = match[0];
+      if (/^[\p{Script=Han}]+$/u.test(run)) {
+        const chars = [...run];
+        if (chars.length === 1) features.add(chars[0]);
+        else
+          for (let i = 0; i < chars.length - 1; i++)
+            features.add(chars[i] + chars[i + 1]);
+      } else if (run) {
+        features.add(run);
+      }
+    }
+    for (const k of m.keywords) {
+      const token = normalize(k).toLowerCase();
+      if (token) features.add(token);
+    }
+    this.featureCache.set(m.id, { revision: m.revision, features });
+    return features;
+  }
+  private static jaccard(a: Set<string>, b: Set<string>) {
+    if (!a.size || !b.size) return 0;
+    let inter = 0;
+    const [small, large] = a.size <= b.size ? [a, b] : [b, a];
+    for (const term of small) if (large.has(term)) inter++;
+    return inter / (a.size + b.size - inter);
+  }
+  private saveSimilarity(
+    subjectId: string,
+    sourceId: string,
+    targetId: string,
+    similarity: number,
+    basis: "lexical" | "semantic" | "hybrid" = "lexical",
+    algorithmVersion = "lexical-bigram-v1",
+  ) {
+    const [a, b] = sourceId < targetId ? [sourceId, targetId] : [targetId, sourceId];
+    const now = Date.now();
+    const existing = this.row(
+      "SELECT id,status FROM memory_similarity WHERE subject_id=? AND source_id=? AND target_id=?",
+      subjectId, a, b,
+    ) as { id: string; status: string } | undefined;
+    if (existing) {
+      if (existing.status === "rejected") return;
+      this.db
+        .prepare(
+          "UPDATE memory_similarity SET similarity=?,basis=?,algorithm_version=?,updated_at=? WHERE id=?",
+        )
+        .run(similarity, basis, algorithmVersion, now, existing.id);
+      return;
+    }
+    this.db
+      .prepare("INSERT INTO memory_similarity VALUES (?,?,?,?,?,?,?,?,?,?)")
+      .run(
+        randomUUID(), subjectId, a, b, similarity, basis,
+        algorithmVersion, "auto", now, now,
+      );
+  }
+  /** 写入后只对当前账户做一次近邻计算；单条写入 O(N) 不会拖慢正常使用。 */
+  private linkSimilar(subjectId: string, memoryId: string) {
+    if (!this.autoLink) return;
+    const target = this.load({ subjectId, admin: true } as Context, memoryId);
+    if (!this.effective(target)) return;
+    const targetFeatures = this.featuresOf(target);
+    const near: { id: string; similarity: number }[] = [];
+    for (const other of this.all(subjectId)) {
+      if (other.id === memoryId || !this.effective(other)) continue;
+      const similarity = Store.jaccard(targetFeatures, this.featuresOf(other));
+      if (similarity >= 0.55) near.push({ id: other.id, similarity });
+    }
+    near.sort((x, y) => y.similarity - x.similarity);
+    this.db
+      .prepare(
+        "DELETE FROM memory_similarity WHERE status='auto' AND (source_id=? OR target_id=?)",
+      )
+      .run(memoryId, memoryId);
+    for (const item of near.slice(0, 5))
+      this.saveSimilarity(subjectId, memoryId, item.id, item.similarity);
+  }
+  /**
+   * 重建账户级相似关系表。先用“稀有 bigram 倒排 + 共享至少 2 个稀有词”生成候选，
+   * 再算精确 Jaccard，避免 5000 条时 2500 万对全量比较。
+   */
+  rebuildSimilarity(
+    subjectId: string,
+    options: { threshold?: number; neighbors?: number } = {},
+  ) {
+    this.adminFor(subjectId);
+    const threshold = options.threshold ?? 0.55;
+    const neighbors = options.neighbors ?? 5;
+    const memories = this.all(subjectId).filter((m) => this.effective(m));
+    const features = new Map<string, Set<string>>();
+    for (const m of memories) features.set(m.id, this.featuresOf(m));
+    const df = new Map<string, number>();
+    for (const set of features.values())
+      for (const term of set) df.set(term, (df.get(term) ?? 0) + 1);
+    const postings = new Map<string, string[]>();
+    for (const [id, set] of features)
+      for (const term of set) {
+        const list = postings.get(term);
+        if (list) list.push(id);
+        else postings.set(term, [id]);
+      }
+    const rareTerms = new Map<string, string[]>();
+    for (const [id, set] of features) {
+      const ordered = [...set]
+        .filter((term) => (df.get(term) ?? 0) >= 2)
+        .sort((a, b) => (df.get(a) ?? 0) - (df.get(b) ?? 0))
+        .slice(0, 12);
+      rareTerms.set(id, ordered);
+    }
+    const pairCounts = new Map<string, number>();
+    for (const [id, terms] of rareTerms)
+      for (const term of terms)
+        for (const other of postings.get(term) ?? [])
+          if (other !== id) {
+            const key = id < other ? id + '\u0000' + other : other + '\u0000' + id;
+            pairCounts.set(key, (pairCounts.get(key) ?? 0) + 1);
+          }
+    const near = new Map<string, { id: string; similarity: number }[]>();
+    for (const [key, count] of pairCounts) {
+      if (count < 2) continue;
+      const [a, b] = key.split('\u0000');
+      const similarity = Store.jaccard(features.get(a)!, features.get(b)!);
+      if (similarity < threshold) continue;
+      (near.get(a) ?? near.set(a, []).get(a)!).push({ id: b, similarity });
+      (near.get(b) ?? near.set(b, []).get(b)!).push({ id: a, similarity });
+    }
+    const pairTotal = Math.floor(
+      [...near.values()].reduce(
+        (sum, list) => sum + Math.min(neighbors, list.length),
+        0,
+      ) / 2,
+    );
+    this.tx(() => {
+      this.db
+        .prepare(
+          "DELETE FROM memory_similarity WHERE subject_id=? AND status='auto'",
+        )
+        .run(subjectId);
+      for (const [id, list] of near) {
+        list.sort((x, y) => y.similarity - x.similarity);
+        for (const item of list.slice(0, neighbors))
+          this.saveSimilarity(subjectId, id, item.id, item.similarity);
+      }
+      return pairTotal;
+    });
+    return {
+      memories: memories.length,
+      candidates: pairCounts.size,
+      pairs: pairTotal,
+    };
+  }
+  /** 读取某条记忆的相似关系（供 Web 详情展示），按相似度降序，最多 20 条。 */
+  relatedSimilarity(subjectId: string, id: string) {
+    const rows = this.rows(
+      "SELECT source_id,target_id,similarity,status FROM memory_similarity " +
+        "WHERE subject_id=? AND status<>'rejected' AND (source_id=? OR target_id=?) " +
+        "ORDER BY similarity DESC LIMIT 20",
+      subjectId,
+      id,
+      id,
+    );
+    const out: {
+      id: string;
+      content: string;
+      type: string;
+      importance: number;
+      similarity: number;
+      status: string;
+    }[] = [];
+    for (const row of rows) {
+      const other =
+        String(row.source_id) === id
+          ? String(row.target_id)
+          : String(row.source_id);
+      const memory = this.row(
+        "SELECT id,json_extract(data,'$.content') AS content,json_extract(data,'$.type') AS type,json_extract(data,'$.importance') AS importance FROM memories WHERE id=? AND subject_id=?",
+        other,
+        subjectId,
+      );
+      if (!memory) continue;
+      out.push({
+        id: String(memory.id),
+        content: String(memory.content),
+        type: String(memory.type),
+        importance: Number(memory.importance),
+        similarity: Number(row.similarity),
+        status: String(row.status),
+      });
+    }
+    return out;
+  }
+  private similarityPairs(subjectId: string, ids: string[]) {
+    const map = new Map<string, Set<string>>();
+    if (!ids.length) return map;
+    const placeholders = ids.map(() => "?").join(",");
+    const sql =
+      "SELECT source_id,target_id FROM memory_similarity " +
+      "WHERE subject_id=? AND status<>'rejected' AND similarity>=0.8 " +
+      "AND source_id IN (" + placeholders + ") AND target_id IN (" + placeholders + ")";
+    for (const row of this.rows(sql, subjectId, ...ids, ...ids)) {
+      const a = String(row.source_id), b = String(row.target_id);
+      (map.get(a) ?? map.set(a, new Set()).get(a)!).add(b);
+      (map.get(b) ?? map.set(b, new Set()).get(b)!).add(a);
+    }
+    return map;
+  }
   private similar(
     ctx: Context,
     embedding?: { model: string; vector: number[] },
@@ -2598,12 +2832,30 @@ export class Store {
         }
       }
     }
-    // 综合排序：相关度优先（0.7），重要度/频次/时间权重为辅（0.3）；
-    // 相关度相同时再比权重与更新时间，保证「重要但不相关」不会压过精确命中。
-    const rank = (m: SearchItem) =>
-      0.75 * (rawScore.get(m.id) ?? 0) +
-      0.1 * (titleScore.get(m.id) ?? 0) +
-      0.15 * m.weight;
+    // 综合排序：相关度仍为主，重要度做 0.5~1.0 的乘性加权，时间作为可配置
+    // 半衰期的乘性衰减（task 类短半衰期，profile/decision 长半衰期）。
+    const HALF_LIFE: Record<string, number> = {
+      task: 14,
+      decision: 365,
+      profile: 730,
+      person: 365,
+      preference: 365,
+      lesson: 365,
+      concept: 365,
+      persona: 365,
+    };
+    const rank = (m: SearchItem) => {
+      const days = Math.max(0, now - m.confirmed_at) / 86400000;
+      const halfLife = HALF_LIFE[m.type] ?? 180;
+      const recency = 2 ** (-days / halfLife);
+      const importance = 0.8 + (0.2 * Math.max(0, Math.min(99, m.importance))) / 99;
+      return (
+        (0.9 * (rawScore.get(m.id) ?? 0) +
+          0.1 * (titleScore.get(m.id) ?? 0)) *
+        importance *
+        recency
+      );
+    };
     scored.sort(
       (a, b) =>
         rank(b) - rank(a) ||
@@ -2613,10 +2865,18 @@ export class Store {
         a.id.localeCompare(b.id),
     );
     const items: SearchItem[] = [];
+    const chosen: SearchItem[] = [];
+    // 只对前 80 个候选查相似关系，避免整表扫描；同一相似簇只保留排名最高的一条，
+    // 省下的预算留给更不同的记忆，直接减少模型要读的重复内容。
+    const pairMap = this.similarityPairs(
+      ctx.subjectId,
+      scored.slice(0, Math.min(80, scored.length)).map((m) => m.id),
+    );
     let used = 100,
       exhausted = false;
     for (const m of scored) {
       if (items.length >= limit) break;
+      if (chosen.some((c) => pairMap.get(c.id)?.has(m.id))) continue;
       const cost = Buffer.byteLength(
         JSON.stringify({
           ...this.compact(m),
@@ -2631,6 +2891,7 @@ export class Store {
       }
       used += cost;
       items.push(m);
+      chosen.push(m);
     }
     return {
       ctx,

@@ -26,6 +26,15 @@ CREATE TRIGGER IF NOT EXISTS memories_subject_immutable BEFORE UPDATE OF subject
 END;
 CREATE TABLE IF NOT EXISTS versions(memory_id TEXT NOT NULL REFERENCES memories(id),revision INTEGER NOT NULL,data TEXT NOT NULL,PRIMARY KEY(memory_id,revision));
 CREATE TABLE IF NOT EXISTS links(id TEXT PRIMARY KEY,subject_id TEXT NOT NULL REFERENCES subjects(id),source_id TEXT NOT NULL REFERENCES memories(id),target_id TEXT NOT NULL REFERENCES memories(id),type TEXT NOT NULL,strength REAL NOT NULL CHECK(strength BETWEEN 0 AND 1),revision INTEGER NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,CHECK(source_id<>target_id),UNIQUE(source_id,target_id,type));
+CREATE TABLE IF NOT EXISTS memory_similarity(id TEXT PRIMARY KEY,subject_id TEXT NOT NULL REFERENCES subjects(id),source_id TEXT NOT NULL REFERENCES memories(id),target_id TEXT NOT NULL REFERENCES memories(id),similarity REAL NOT NULL CHECK(similarity BETWEEN 0 AND 1),basis TEXT NOT NULL CHECK(basis IN ('lexical','semantic','hybrid')),algorithm_version TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'auto' CHECK(status IN ('auto','confirmed','rejected')),created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,CHECK(source_id<>target_id),UNIQUE(subject_id,source_id,target_id));
+CREATE INDEX IF NOT EXISTS similarity_source ON memory_similarity(subject_id,source_id,similarity);
+CREATE INDEX IF NOT EXISTS similarity_target ON memory_similarity(subject_id,target_id,similarity);
+CREATE TRIGGER IF NOT EXISTS similarity_scope_insert BEFORE INSERT ON memory_similarity BEGIN
+ SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM memories a JOIN memories b ON a.subject_id=b.subject_id WHERE a.id=NEW.source_id AND b.id=NEW.target_id AND a.subject_id=NEW.subject_id) THEN RAISE(ABORT,'SCOPE_VIOLATION') END;
+END;
+CREATE TRIGGER IF NOT EXISTS similarity_cleanup_delete BEFORE DELETE ON memories BEGIN
+ DELETE FROM memory_similarity WHERE source_id=OLD.id OR target_id=OLD.id;
+END;
 CREATE TABLE IF NOT EXISTS vectors(memory_id TEXT PRIMARY KEY REFERENCES memories(id),revision INTEGER NOT NULL,model TEXT NOT NULL,vector BLOB NOT NULL);
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(id UNINDEXED,subject_id UNINDEXED,terms);
 CREATE TABLE IF NOT EXISTS dedup(actor TEXT NOT NULL,tool TEXT NOT NULL,request_id TEXT NOT NULL,args_hash TEXT NOT NULL,response TEXT NOT NULL,snapshots TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(actor,tool,request_id));

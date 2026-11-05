@@ -585,6 +585,8 @@ export function Stats({
     refresh,
   );
   const config = useResource<Config>("/config", refresh);
+  const [rebuilding, setRebuilding] = useState(false);
+  const [rebuildResult, setRebuildResult] = useState<string>("");
   const d = data.data;
   const embeddingMissing = config.data && !config.data.embeddingModel;
   const metrics = [
@@ -637,6 +639,32 @@ export function Stats({
           <option value="90">最近 90 天</option>
         </select>
       </Heading>
+      <div className="maintenance-row">
+        <button
+          disabled={rebuilding}
+          onClick={async () => {
+            setRebuilding(true);
+            setRebuildResult("");
+            try {
+              const stats = await api<{ memories: number; pairs: number }>(
+                "/maintenance/similarity",
+                "POST",
+                writeBody({ subject_id: subject, threshold: 0.55, neighbors: 5 }),
+              );
+              setRebuildResult(
+                "已扫描 " + stats.memories + " 条记忆，关联 " + stats.pairs + " 对相似记忆。",
+              );
+            } catch (error) {
+              setRebuildResult(error instanceof Error ? error.message : "重建失败");
+            } finally {
+              setRebuilding(false);
+            }
+          }}
+        >
+          {rebuilding ? "正在重建…" : "重建相似关系"}
+        </button>
+        <span className="muted">{rebuildResult}</span>
+      </div>
       <State loading={data.loading} error={data.error}>
         <div className="metric-grid">
           {metrics.map(([label, value]) => (

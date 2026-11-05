@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import {
   api,
   dataChanged,
@@ -357,6 +357,9 @@ export function Memories({
   const [cursor, setCursor] = useState("");
   const [editing, setEditing] = useState<Memory | null | undefined>();
   const [detail, setDetail] = useState<Memory | null>(null);
+  const [similar, setSimilar] = useState<
+    { id: string; content: string; type: MemoryType; importance: number; similarity: number }[]
+  >([]);
   const [preview, setPreview] = useState<{
     value: Preview;
     path: string;
@@ -382,6 +385,25 @@ export function Memories({
       }),
     refresh + version,
   );
+  useEffect(() => {
+    if (!detail) {
+      setSimilar([]);
+      return;
+    }
+    let live = true;
+    api<
+      { id: string; content: string; type: MemoryType; importance: number; similarity: number }[]
+    >("/memories/" + detail.id + "/similar" + query({ subject_id: subject }))
+      .then((rows) => {
+        if (live) setSimilar(rows);
+      })
+      .catch(() => {
+        if (live) setSimilar([]);
+      });
+    return () => {
+      live = false;
+    };
+  }, [detail, subject]);
   const reload = () => {
     setVersion((v) => v + 1);
     setDetail(null);
@@ -589,6 +611,22 @@ export function Memories({
             <dt>版本</dt>
             <dd>{detail.revision}</dd>
           </dl>
+          {similar.length > 0 && (
+            <div className="similar-block">
+              <h4>相似记忆（已自动关联，检索时只返回一条代表）</h4>
+              <ul>
+                {similar.map((item) => (
+                  <li key={item.id}>
+                    <span className="tag">{types[item.type]}</span>
+                    <span className="similar-text">{item.content}</span>
+                    <span className="similar-score">
+                      {(item.similarity * 100).toFixed(0)}%
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           <details>
             <summary>来源记录</summary>
             <pre>
