@@ -10,6 +10,15 @@ import { MemoryService } from "./service.js";
 import { registerAdmin } from "./admin.js";
 import { createMcpHandler } from "../mcp/http.js";
 import { createEmbeddingFromEnv } from "../embedding/openai.js";
+export interface ServerSettingsContext {
+  path: string;
+  bindHost: string;
+  port: number;
+  /** 环境变量 PUBLIC_ORIGIN 覆盖值（非空时后台改设置不会立即生效）。 */
+  originOverride: string | null;
+  /** 环境变量 HOST 覆盖值（非空时后台改设置不会立即生效）。 */
+  hostOverride: string | null;
+}
 export interface AppOptions {
   databasePath: string;
   passwordHash: string;
@@ -17,6 +26,10 @@ export interface AppOptions {
   backupDir: string;
   webRoot?: string;
   embeddingEnv?: NodeJS.ProcessEnv;
+  /** 管理员密码哈希文件路径；提供后才能在线修改密码。 */
+  passwordFile?: string;
+  /** 监听地址设置上下文；提供后才能在线切换监听地址。 */
+  serverSettings?: ServerSettingsContext;
 }
 export async function buildApp(options: AppOptions) {
   const unlock = await acquireInstanceLock(options.databasePath);
@@ -141,6 +154,8 @@ export async function buildApp(options: AppOptions) {
       secureCookie: options.origin.startsWith("https:"),
       backupDir: options.backupDir,
       origin: options.origin,
+      passwordFile: options.passwordFile,
+      serverSettings: options.serverSettings,
     });
     app.get("/health", async () => ({ ok: true }));
     const webRoot = resolve(options.webRoot ?? "dist/web");

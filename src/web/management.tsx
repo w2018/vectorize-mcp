@@ -13,6 +13,7 @@ import {
   type BotPreset,
   type Page,
   type Preview,
+  type ServerNetwork,
   type Token,
   type WebdavStatus,
 } from "./api";
@@ -1670,6 +1671,8 @@ export function Settings({ refresh }: { refresh: number }) {
           )}
         </State>
       </section>
+      <SecuritySettings />
+      <NetworkSettings />
       {pending && (
         <PreviewDialog
           title="发布配置修改"
@@ -1983,5 +1986,192 @@ function CloudDeleteDialog({
         )
       )}
     </Modal>
+  );
+}
+
+function SecuritySettings() {
+  const action = useAction();
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [done, setDone] = useState(false);
+  const weak = next.length > 0 && (next.length < 12 || next.length > 1024);
+  const mismatch = confirm.length > 0 && next !== confirm;
+  const ready =
+    current.length > 0 &&
+    next.length > 0 &&
+    next === confirm &&
+    !weak &&
+    !action.busy;
+  return (
+    <section className="panel padded" id="security">
+      <h2>安全</h2>
+      <p className="hint">
+        修改管理员密码，长度 12–1024 个字符。修改成功后所有登录会话立即失效，需要用新密码重新登录。
+      </p>
+      <Feedback error={action.error} notice={action.notice} />
+      {done ? (
+        <div className="notice success" role="status">
+          <p>密码已修改，请用新密码重新登录。</p>
+          <button className="primary" onClick={() => window.location.reload()}>
+            重新登录
+          </button>
+        </div>
+      ) : (
+        <form
+          className="editor-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void action.run(async () => {
+              await api(
+                "/auth/password",
+                "POST",
+                writeBody({
+                  current_password: current,
+                  new_password: next,
+                }),
+              );
+              setCurrent("");
+              setNext("");
+              setConfirm("");
+              setDone(true);
+            }, "密码已修改");
+          }}
+        >
+          <label>
+            当前密码
+            <input
+              type="password"
+              aria-label="当前密码"
+              autoComplete="current-password"
+              value={current}
+              onChange={(e) => setCurrent(e.target.value)}
+            />
+          </label>
+          <label>
+            新密码
+            <input
+              type="password"
+              aria-label="新密码"
+              autoComplete="new-password"
+              value={next}
+              onChange={(e) => setNext(e.target.value)}
+            />
+          </label>
+          <label>
+            确认新密码
+            <input
+              type="password"
+              aria-label="确认新密码"
+              autoComplete="new-password"
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value)}
+            />
+          </label>
+          {weak && <small className="hint">新密码需 12–1024 个字符。</small>}
+          {mismatch && (
+            <small className="hint">两次输入的新密码不一致。</small>
+          )}
+          <footer>
+            <button className="primary" disabled={!ready}>
+              {action.busy ? "正在修改…" : "修改密码"}
+            </button>
+          </footer>
+        </form>
+      )}
+    </section>
+  );
+}
+
+function NetworkSettings() {
+  const net = useResource<ServerNetwork>("/server/network", 0);
+  const action = useAction();
+  const [bind, setBind] = useState<"127.0.0.1" | "0.0.0.0">("127.0.0.1");
+  const [origin, setOrigin] = useState("");
+  const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    if (net.data) {
+      setBind(net.data.saved.bind_host);
+      setOrigin(net.data.saved.public_origin ?? "");
+    }
+  }, [net.data]);
+  const override = net.data?.env_override;
+  const locked = Boolean(override?.host);
+  return (
+    <section className="panel padded" id="network">
+      <h2>网络访问</h2>
+      <p className="hint">
+        控制服务监听的地址。默认仅本机可访问；对外开放时请同时填写浏览器实际访问的完整地址，公网访问务必使用 HTTPS 反向代理。保存后需重启服务生效。
+      </p>
+      <State loading={net.loading} error={net.error}>
+        {net.data && (
+          <>
+            {override?.host || override?.origin ? (
+              <div className="notice warning">
+                当前由环境变量覆盖：HOST={override.host ?? "未设置"}、PUBLIC_ORIGIN=
+                {override.origin ?? "未设置"}。后台保存的设置将在清除这些环境变量并重启后生效。
+              </div>
+            ) : null}
+            <div className="notice">
+              当前运行：监听 {net.data.bind_host}，对外地址 {net.data.public_origin}，端口{" "}
+              {net.data.port}
+            </div>
+            <form
+              className="editor-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void action.run(async () => {
+                  await api(
+                    "/server/network",
+                    "PUT",
+                    writeBody({
+                      bind_host: bind,
+                      public_origin: origin.trim() || null,
+                    }),
+                  );
+                  setSaved(true);
+                }, "网络设置已保存");
+              }}
+            >
+              <label>
+                监听地址
+                <select
+                  aria-label="监听地址"
+                  value={bind}
+                  disabled={locked}
+                  onChange={(e) =>
+                    setBind(e.target.value as "127.0.0.1" | "0.0.0.0")
+                  }
+                >
+                  <option value="127.0.0.1">仅本机访问（127.0.0.1，最安全）</option>
+                  <option value="0.0.0.0">对外开放（0.0.0.0，需自行保障网络与 HTTPS 安全）</option>
+                </select>
+              </label>
+              <label>
+                对外访问地址（Origin）
+                <input
+                  aria-label="对外访问地址"
+                  placeholder="https://mem.example.com"
+                  value={origin}
+                  disabled={locked}
+                  onChange={(e) => setOrigin(e.target.value)}
+                />
+              </label>
+              {bind === "0.0.0.0" && (
+                <small className="hint">
+                  选择对外开放时必须填写对外访问地址；公网访问请使用 HTTPS（反向代理）。
+                </small>
+              )}
+              <footer>
+                {saved && <span>已保存，需重启服务生效。</span>}
+                <button className="primary" disabled={action.busy || locked}>
+                  {action.busy ? "正在保存…" : "保存网络设置"}
+                </button>
+              </footer>
+            </form>
+          </>
+        )}
+      </State>
+    </section>
   );
 }

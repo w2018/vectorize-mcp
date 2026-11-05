@@ -12,10 +12,18 @@ import {
   timingSafeEqual,
 } from "node:crypto";
 import { existsSync, unlinkSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { WebdavCloud } from "./webdav.js";
+import { hashPassword } from "./password.js";
+import {
+  isLoopbackOrigin,
+  readServerSettings,
+  validOrigin,
+  writeServerSettings,
+  type BindHost,
+} from "./server-settings.js";
 import type { DatabasePool } from "./database.js";
 import { BOT_PRESETS } from "../core/catalog.js";
 import {
@@ -109,8 +117,18 @@ export async function registerAdmin(
     secureCookie: boolean;
     backupDir: string;
     origin: string;
+    passwordFile?: string;
+    serverSettings?: {
+      path: string;
+      bindHost: string;
+      port: number;
+      originOverride: string | null;
+      hostOverride: string | null;
+    };
   },
 ): Promise<void> {
+  // 允许在线改密：内存中的哈希随修改更新，后续登录立即使用新密码。
+  let passwordHash = options.passwordHash;
   const sessions = new Map<string, Session>();
   const imports = new Map<string, StagedImport>();
   let stagedBytes = 0;
@@ -253,7 +271,7 @@ export async function registerAdmin(
     "POST",
     "/auth/login",
     async (req, reply) => {
-      if (!(await verify(body(req).password, options.passwordHash)))
+      if (!(await verify(body(req).password, passwordHash)))
         throw new DomainError("UNAUTHENTICATED");
       const prior = current(req);
       if (prior) sessions.delete(prior.id);
@@ -272,6 +290,87 @@ export async function registerAdmin(
       secure: options.secureCookie,
     });
     return { authenticated: false };
+  });
+  const writePasswordFile = async (file: string, hash: string) => {
+    await mkdir(dirname(file), { recursive: true });
+    const tmp = file + ".tmp";
+    await writeFile(tmp, JSON.stringify({ hash }), { mode: 0o600 });
+    await rename(tmp, file);
+  };
+  route(
+    "POST",
+    "/auth/password",
+    async (req, reply) => {
+      if (!options.passwordFile) throw new DomainError("FEATURE_DISABLED");
+      const b = body(req);
+      const currentPassword = text(b.current_password);
+      const newPassword = text(b.new_password);
+      if (newPassword.length < 12 || newPassword.length > 1024)
+        throw new DomainError("VALIDATION_ERROR");
+      if (newPassword === currentPassword)
+        throw new DomainError("VALIDATION_ERROR");
+      if (!(await verify(currentPassword, passwordHash)))
+        throw new DomainError("FORBIDDEN");
+      const encoded = hashPassword(newPassword);
+      await writePasswordFile(options.passwordFile, encoded);
+      passwordHash = encoded;
+      // 改密后立即吊销全部会话，旧会话不能再操作任何接口。
+      sessions.clear();
+      reply.clearCookie(COOKIE, {
+        path: "/",
+        httpOnly: true,
+        sameSite: "strict",
+        secure: options.secureCookie,
+      });
+      return { changed: true, reauthenticate: true };
+    },
+    { config: { rateLimit: { max: 5, timeWindow: "1 minute" } } },
+  );
+  route("GET", "/server/network", async () => {
+    if (!options.serverSettings) throw new DomainError("FEATURE_DISABLED");
+    const saved = await readServerSettings(options.serverSettings.path);
+    return {
+      bind_host: options.serverSettings.bindHost,
+      public_origin: options.origin,
+      port: options.serverSettings.port,
+      saved,
+      env_override: {
+        host: options.serverSettings.hostOverride,
+        origin: options.serverSettings.originOverride,
+      },
+    };
+  });
+  route("PUT", "/server/network", async (req) => {
+    if (!options.serverSettings) throw new DomainError("FEATURE_DISABLED");
+    const b = body(req);
+    const bindHost = text(b.bind_host);
+    if (bindHost !== "127.0.0.1" && bindHost !== "0.0.0.0")
+      throw new DomainError("VALIDATION_ERROR");
+    const rawOrigin = b.public_origin;
+    const publicOrigin =
+      rawOrigin === undefined || rawOrigin === null || rawOrigin === ""
+        ? null
+        : text(rawOrigin);
+    if (publicOrigin !== null && !validOrigin(publicOrigin))
+      throw new DomainError("VALIDATION_ERROR");
+    if (bindHost === "0.0.0.0") {
+      if (!publicOrigin)
+        throw new DomainError("VALIDATION_ERROR");
+      if (!publicOrigin.startsWith("https:") && !isLoopbackOrigin(publicOrigin))
+        throw new DomainError("VALIDATION_ERROR");
+    }
+    await writeServerSettings(options.serverSettings.path, {
+      bind_host: bindHost as BindHost,
+      public_origin: publicOrigin,
+    });
+    return {
+      saved: true,
+      restart_required: true,
+      env_override: {
+        host: options.serverSettings.hostOverride,
+        origin: options.serverSettings.originOverride,
+      },
+    };
   });
   const paged = (items: unknown[], q: RecordData) => {
     const start = offset(q.cursor),

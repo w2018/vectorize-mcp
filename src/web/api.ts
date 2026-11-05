@@ -136,6 +136,16 @@ export interface Bootstrap {
   warnings: string[];
 }
 
+export interface ServerNetwork {
+  bind_host: "127.0.0.1" | "0.0.0.0";
+  public_origin: string;
+  port: number;
+  saved: {
+    bind_host: "127.0.0.1" | "0.0.0.0";
+    public_origin: string | null;
+  };
+  env_override: { host: string | null; origin: string | null };
+}
 export interface Config {
   revision: number;
   importanceFactor: number;

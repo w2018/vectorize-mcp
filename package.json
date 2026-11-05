@@ -1,6 +1,6 @@
 {
   "name": "vectorize-mcp",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "private": true,
   "type": "module",
   "engines": {
@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit && npm run typecheck:web",
     "typecheck:web": "tsc --ignoreConfig --noEmit --strict --jsx react-jsx --module esnext --moduleResolution bundler --target es2022 --lib es2022,dom --skipLibCheck src/web/vite-env.d.ts src/web/main.tsx vite.config.ts",
     "init-admin": "tsx src/server/main.ts init-admin",
+    "reset-admin": "tsx src/server/main.ts reset-admin",
     "bridge": "node dist/mcp/stdio.js",
     "test": "tsx --test tmp/tests/*.test.ts",
     "start": "node dist/server/main.js",

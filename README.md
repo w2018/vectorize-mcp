@@ -30,7 +30,21 @@ Remove-Item Env:ADMIN_PASSWORD
 npm start
 ```
 
-初始化只在本机保存 scrypt 哈希；已有管理员文件时拒绝覆盖。启动与初始化必须使用同一个 `DATA_DIR`。生成环境变量文件后可参考 `.env.example`，并用 `node --env-file=.env dist/server/main.js` 启动。
+Linux / macOS：
+
+```sh
+node --version
+npm ci
+npm run build
+export DATA_DIR="$PWD/data"
+ADMIN_PASSWORD="请替换为至少12个字符的管理员密码" npm run init-admin
+unset ADMIN_PASSWORD
+npm start
+```
+
+> Linux 前置依赖：Node.js 24.x、npm，以及编译原生模块所需的构建环境（Debian/Ubuntu 上为 `build-essential python3`，RHEL/CentOS 上为 `gcc-c++ make python3`）。若 `npm ci` 安装失败，先升级 Node 版本或补装构建工具。
+
+Windows 与 Linux 行为一致：初始化只在本机保存 scrypt 哈希；已有管理员文件时拒绝覆盖。启动与初始化必须使用同一个 `DATA_DIR`。生成环境变量文件后可参考 `.env.example`，并用 `node --env-file=.env dist/server/main.js` 启动。
 
 打开 <http://127.0.0.1:3100>，用管理员密码登录，在“账户与凭据”中创建账户并保存**仅展示一次**的 Token。忘记时撤销旧凭据并重新签发即可。
 
@@ -39,13 +53,22 @@ npm start
 | 变量 | 说明 |
 | --- | --- |
 | `DATA_DIR` | 数据目录，默认 `data`，建议使用固定绝对路径 |
-| `HOST` / `PORT` | 监听地址与端口，默认 `127.0.0.1:3100` |
-| `PUBLIC_ORIGIN` | 浏览器实际访问的完整 origin，无末尾斜杠 |
+| `HOST` / `PORT` | 监听地址与端口，默认 `127.0.0.1:3100`；也可以在后台「设置 → 网络访问」切换（保存需重启） |
+| `PUBLIC_ORIGIN` | 浏览器实际访问的完整 origin，无末尾斜杠；对外开放时必填 |
 | `ADMIN_PASSWORD` | 仅用于 `npm run init-admin` |
 | `EMBEDDING_BASE_URL` / `EMBEDDING_MODEL` / `EMBEDDING_DIMENSION` | 可选编码器，三项同时设置或全部省略 |
 | `EMBEDDING_API_KEY` | 可选服务端编码器密钥，不通过后台返回 |
 
 远程访问需 HTTPS 反向代理，并把 `PUBLIC_ORIGIN` 设为该 HTTPS 地址。后端监听地址与公开 origin 是两个设置。
+
+## 管理员密码
+
+- **在线修改**：登录后在「设置 → 安全」输入当前密码与新密码即可修改；改密成功后所有会话立即退出，需用新密码重新登录。
+- **忘记密码**：无法反推哈希，只能重置。停服务后设置 `ADMIN_PASSWORD`（12–1024 字符）并执行 `npm run reset-admin`，清掉该环境变量后重启服务。
+
+## 监听地址
+
+「设置 → 网络访问」可选**仅本机（127.0.0.1）**或**对外开放（0.0.0.0）**。对外开放时须填写浏览器实际访问的完整地址，公网访问务必使用 HTTPS 反向代理；保存后重启服务生效。`HOST` / `PUBLIC_ORIGIN` 环境变量存在时优先生效，后台设置需清除环境变量后才接管。
 
 ## 连接 MCP
 
@@ -81,6 +104,7 @@ HTTP 客户端填写 `http://127.0.0.1:3100/mcp`，并发送请求头 `Authoriza
 ```text
 data/
   admin-password.json          管理员密码哈希
+  server-settings.json         监听地址与对外 origin（后台「网络访问」保存）
   memory.sqlite                主数据库
   memory.sqlite.logs.sqlite    独立观察日志库
   memory.sqlite.trash.sqlite   回收站快照库
