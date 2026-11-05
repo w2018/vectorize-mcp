@@ -136,6 +136,29 @@ export interface Bootstrap {
   warnings: string[];
 }
 
+export interface UpdateRelease {
+  version: string;
+  tag: string;
+  published_at: string | null;
+  notes: string;
+  html_url: string | null;
+  tarball: string | null;
+  prerelease: boolean;
+}
+export interface UpdateCheck {
+  current: string;
+  latest: UpdateRelease | null;
+  has_update: boolean;
+  error: string | null;
+}
+export interface UpdateJob {
+  id: string;
+  status: "running" | "done" | "failed";
+  logs: { at: number; level: "info" | "warn" | "error"; text: string }[];
+  result?: { version?: string; received?: number; total?: number } | null;
+  error?: string | null;
+  started_at: number;
+}
 export interface ServerNetwork {
   bind_host: "127.0.0.1" | "0.0.0.0";
   public_origin: string;

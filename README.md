@@ -70,6 +70,10 @@ Windows 与 Linux 行为一致：初始化只在本机保存 scrypt 哈希；已
 
 「设置 → 网络访问」可选**仅本机（127.0.0.1）**或**对外开放（0.0.0.0）**。对外开放时须填写浏览器实际访问的完整地址，公网访问务必使用 HTTPS 反向代理；保存后重启服务生效。`HOST` / `PUBLIC_ORIGIN` 环境变量存在时优先生效，后台设置需清除环境变量后才接管。
 
+## 在线更新
+
+「关于 → 版本与更新」可检测 GitHub 最新 Release，一键下载源码包（GitHub tar.gz）并覆盖程序文件；覆盖前自动备份被改动文件到 `data/updates/backup-*`，且**不会触碰 `data/`、`node_modules/`、`dist/`、`.git/`**，数据库与配置安全。覆盖后需在页面上手动「重新编译」（`npm install` + `npm run build`）再「启动服务」（`npm start`）；每一步都要 6 位验证码二次确认。源码包不含原生模块，跨平台（Windows / Linux）均需在本机重新编译。
+
 ## 连接 MCP
 
 HTTP 客户端填写 `http://127.0.0.1:3100/mcp`，并发送请求头 `Authorization: Bearer <后台Token>`。远程使用 HTTPS。

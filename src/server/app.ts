@@ -30,6 +30,8 @@ export interface AppOptions {
   passwordFile?: string;
   /** 监听地址设置上下文；提供后才能在线切换监听地址。 */
   serverSettings?: ServerSettingsContext;
+  /** 安装根目录；在线更新在此覆盖程序文件。默认进程工作目录。 */
+  updateRoot?: string;
 }
 export async function buildApp(options: AppOptions) {
   const unlock = await acquireInstanceLock(options.databasePath);
@@ -156,6 +158,7 @@ export async function buildApp(options: AppOptions) {
       origin: options.origin,
       passwordFile: options.passwordFile,
       serverSettings: options.serverSettings,
+      updateRoot: options.updateRoot,
     });
     app.get("/health", async () => ({ ok: true }));
     const webRoot = resolve(options.webRoot ?? "dist/web");

@@ -78,6 +78,7 @@ if (process.argv.includes("init-admin")) {
     origin,
     backupDir: join(dataDir, "backups"),
     passwordFile,
+    updateRoot: process.cwd(),
     serverSettings: {
       path: serverSettingsFile,
       bindHost: host,

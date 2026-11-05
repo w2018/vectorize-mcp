@@ -11,9 +11,10 @@ import {
   scrypt,
   timingSafeEqual,
 } from "node:crypto";
-import { existsSync, unlinkSync } from "node:fs";
-import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { createWriteStream, existsSync, unlinkSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { WebdavCloud } from "./webdav.js";
 import { hashPassword } from "./password.js";
@@ -125,8 +126,11 @@ export async function registerAdmin(
       originOverride: string | null;
       hostOverride: string | null;
     };
+    /** 安装根目录（源码与 dist 所在），在线更新会在此目录内覆盖程序文件。 */
+    updateRoot?: string;
   },
 ): Promise<void> {
+  const installRoot = resolve(options.updateRoot ?? process.cwd());
   // 允许在线改密：内存中的哈希随修改更新，后续登录立即使用新密码。
   let passwordHash = options.passwordHash;
   const sessions = new Map<string, Session>();
@@ -1147,5 +1151,363 @@ export async function registerAdmin(
       })),
       next_cursor: rows.length > limit ? cursor(start + limit) : null,
     };
+  });
+  // ── 在线更新（下载 Release 源码 → 覆盖程序文件 → 重新编译 / 启动） ──
+  const GITHUB_REPO = "w2018/vectorize-mcp";
+  const dataRoot = dirname(options.backupDir);
+  const updatesDir = join(dataRoot, "updates");
+  const updateTmp = join(updatesDir, "tmp");
+  const updateConfirms = new Map<
+    string,
+    { code: string; session: string; expires: number; attempts: number }
+  >();
+  const currentVersion = async () => {
+    try {
+      const raw = JSON.parse(
+        await readFile(join(installRoot, "package.json"), "utf8"),
+      );
+      return String(raw.version ?? "0.0.0");
+    } catch {
+      return "0.0.0";
+    }
+  };
+  const compareVersions = (a: string, b: string) => {
+    const pa = a.replace(/^v/, "").split(/[.-]/).map((x: string) => parseInt(x, 10) || 0);
+    const pb = b.replace(/^v/, "").split(/[.-]/).map((x: string) => parseInt(x, 10) || 0);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+      if (d !== 0) return d;
+    }
+    return 0;
+  };
+  let latestCache: { at: number; data: RecordData } | null = null;
+  const fetchLatestRelease = async () => {
+    if (latestCache && Date.now() - latestCache.at < 600000)
+      return latestCache.data;
+    const res = await fetch(
+      "https://api.github.com/repos/" + GITHUB_REPO + "/releases/latest",
+      {
+        headers: {
+          "User-Agent": "vectorize-mcp",
+          Accept: "application/vnd.github+json",
+        },
+      },
+    );
+    if (!res.ok)
+      throw new DomainError(
+        "UPDATE_CHECK_FAILED",
+        "无法获取最新版本（HTTP " + res.status + "）",
+      );
+    const j = await res.json();
+    const tag = String(j.tag_name ?? "");
+    const tarball =
+      typeof j.tarball_url === "string" ? String(j.tarball_url) : null;
+    const data = {
+      version: tag.replace(/^v/, ""),
+      tag,
+      published_at: j.published_at ?? null,
+      notes: typeof j.body === "string" ? j.body : "",
+      html_url: j.html_url ?? null,
+      tarball,
+      prerelease: Boolean(j.prerelease),
+    };
+    latestCache = { at: Date.now(), data };
+    return data;
+  };
+  const allowedSource = (url: string) =>
+    url.startsWith("https://codeload.github.com/" + GITHUB_REPO + "/") ||
+    url.startsWith("https://api.github.com/repos/" + GITHUB_REPO + "/") ||
+    url.startsWith("https://github.com/" + GITHUB_REPO + "/");
+  const issueUpdateCode = (req: FastifyRequest, action: string) => {
+    const code = String(randomInt(0, 1000000)).padStart(6, "0");
+    const expires = Date.now() + 300000;
+    updateConfirms.set(action, {
+      code,
+      session: current(req)!.id,
+      expires,
+      attempts: 0,
+    });
+    return { action, code, expires_at: expires };
+  };
+  const verifyUpdateCode = (
+    req: FastifyRequest,
+    action: string,
+    code: unknown,
+  ) => {
+    const entry = updateConfirms.get(action);
+    if (
+      !entry ||
+      entry.session !== current(req)!.id ||
+      entry.expires < Date.now() ||
+      entry.attempts >= 5
+    ) {
+      updateConfirms.delete(action);
+      throw new DomainError("PREVIEW_EXPIRED", "验证码已失效，请重新获取");
+    }
+    entry.attempts++;
+    const given = Buffer.from(String(code ?? ""));
+    const expected = Buffer.from(entry.code);
+    if (given.length !== expected.length || !timingSafeEqual(given, expected))
+      throw new DomainError("FORBIDDEN", "验证码不正确");
+    updateConfirms.delete(action);
+  };
+  const runCommand = (cmd: string, args: string[]) =>
+    new Promise((resolvePromise, rejectPromise) => {
+      const child = spawn(cmd, args, {
+        cwd: installRoot,
+        windowsHide: true,
+        shell: process.platform === "win32",
+      });
+      let out = "";
+      child.stdout.on("data", (d) => (out += d.toString()));
+      child.stderr.on("data", (d) => (out += d.toString()));
+      child.on("error", rejectPromise);
+      child.on("close", (code) =>
+        code === 0
+          ? resolvePromise(out)
+          : rejectPromise(new Error(out.trim() || "命令退出码 " + code)),
+      );
+    });
+  const runJobCommand = (
+    job: CloudJob,
+    cmd: string,
+    args: string[],
+  ) =>
+    new Promise<void>((resolvePromise, rejectPromise) => {
+      log(job, "info", "$ " + cmd + " " + args.join(" "));
+      const child = spawn(cmd, args, {
+        cwd: installRoot,
+        windowsHide: true,
+        shell: process.platform === "win32",
+      });
+      const onData = (d: Buffer) => {
+        for (const line of d.toString().split(/\r?\n/))
+          if (line.trim()) log(job, "info", line.slice(0, 400));
+      };
+      child.stdout.on("data", onData);
+      child.stderr.on("data", onData);
+      child.on("error", rejectPromise);
+      child.on("close", (code) =>
+        code === 0
+          ? resolvePromise()
+          : rejectPromise(new Error("命令退出码 " + code)),
+      );
+    });
+  const newJob = () => {
+    for (const [id, job] of jobs)
+      if (
+        job.status !== "running" &&
+        Date.now() - job.started_at > 30 * 60 * 1000
+      )
+        jobs.delete(id);
+    const job: CloudJob = {
+      id: randomUUID(),
+      status: "running",
+      logs: [],
+      started_at: Date.now(),
+    };
+    jobs.set(job.id, job);
+    return job;
+  };
+  route("GET", "/update/check", async () => {
+    const current = await currentVersion();
+    let latest = null;
+    let error = null;
+    try {
+      latest = await fetchLatestRelease();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+    return {
+      current,
+      latest,
+      has_update: latest
+        ? compareVersions(String(latest.version), current) > 0
+        : false,
+      error,
+    };
+  });
+  route("GET", "/update/jobs/:id", async (req) => {
+    const job = jobs.get(param(req));
+    if (!job) throw new DomainError("NOT_FOUND");
+    return {
+      id: job.id,
+      status: job.status,
+      logs: job.logs,
+      result: job.result ?? null,
+      error: job.error ?? null,
+      started_at: job.started_at,
+    };
+  });
+  route("POST", "/update/confirm", async (req) => {
+    const action = text(body(req).action);
+    if (!["apply", "build", "start", "stop"].includes(action))
+      throw new DomainError("VALIDATION_ERROR");
+    return issueUpdateCode(req, action);
+  });
+  route("POST", "/update/download", async () => {
+    const release = await fetchLatestRelease();
+    const url = release.tarball ? String(release.tarball) : "";
+    if (!url || !allowedSource(url))
+      throw new DomainError("UPDATE_UNAVAILABLE", "暂无可用下载地址");
+    const version = String(release.version);
+    const job = newJob();
+    log(job, "info", "准备下载 v" + version + " 源码包…");
+    void (async () => {
+      try {
+        await mkdir(updateTmp, { recursive: true });
+        const res = await fetch(url, {
+          headers: { "User-Agent": "vectorize-mcp" },
+          redirect: "follow",
+        });
+        if (!res.ok || !res.body)
+          throw new Error("下载失败（HTTP " + res.status + "）");
+        const total = Number(res.headers.get("content-length") ?? 0);
+        const dest = join(updateTmp, "v" + version + ".tar.gz");
+        const out = createWriteStream(dest);
+        let received = 0;
+        let lastPercent = -1;
+        job.result = { version, received: 0, total };
+        for await (const chunk of res.body) {
+          received += chunk.length;
+          out.write(chunk);
+          job.result = { version, received, total };
+          const percent = total ? Math.floor((received / total) * 100) : 0;
+          if (percent >= lastPercent + 5) {
+            lastPercent = percent;
+            log(
+              job,
+              "info",
+              "已下载 " +
+                percent +
+                "%（" +
+                megabytes(received) +
+                (total ? " / " + megabytes(total) : "") +
+                "）",
+            );
+          }
+        }
+        await new Promise<void>((r) => out.end(() => r()));
+        job.result = { version, received, total, archive: dest };
+        log(job, "info", "下载完成，共 " + megabytes(received));
+        job.status = "done";
+      } catch (error) {
+        job.status = "failed";
+        job.error = error instanceof Error ? error.message : String(error);
+        log(job, "error", "下载失败：" + job.error);
+      }
+    })();
+    return { job_id: job.id, version };
+  });
+  route("POST", "/update/apply", async (req) => {
+    const b = body(req);
+    verifyUpdateCode(req, "apply", b.code);
+    const version = text(b.version).replace(/^v/, "");
+    if (!/^\d+\.\d+\.\d+$/.test(version))
+      throw new DomainError("VALIDATION_ERROR");
+    const archive = join(updateTmp, "v" + version + ".tar.gz");
+    if (!existsSync(archive))
+      throw new DomainError("NOT_FOUND", "请先下载该版本源码包");
+    const extractDir = join(updateTmp, "extract-" + randomUUID());
+    await mkdir(extractDir, { recursive: true });
+    try {
+      await runCommand("tar", ["-xzf", archive, "-C", extractDir]);
+      const dirs = (await readdir(extractDir, { withFileTypes: true })).filter(
+        (e) => e.isDirectory(),
+      );
+      if (dirs.length !== 1) throw new Error("源码包结构异常");
+      const srcRoot = join(extractDir, dirs[0].name);
+      const oldVersion = await currentVersion();
+      const backupDir = join(
+        updatesDir,
+        "backup-" + oldVersion + "-" + Date.now(),
+      );
+      await mkdir(backupDir, { recursive: true });
+      const skip = new Set(["data", ".git", "tmp", "node_modules", "dist"]);
+      let files = 0;
+      const walk = async (dir: string): Promise<void> => {
+        for (const entry of await readdir(dir, { withFileTypes: true })) {
+          const abs = join(dir, entry.name);
+          const rel = relative(srcRoot, abs);
+          const top = rel.split(sep)[0];
+          if (skip.has(top ?? "")) continue;
+          if (entry.name === ".env" || entry.name.startsWith(".env."))
+            continue;
+          if (entry.isDirectory()) {
+            await walk(abs);
+            continue;
+          }
+          const dest = join(installRoot, rel);
+          if (existsSync(dest)) {
+            const backupPath = join(backupDir, rel);
+            await mkdir(dirname(backupPath), { recursive: true });
+            await cp(dest, backupPath);
+          }
+          await mkdir(dirname(dest), { recursive: true });
+          await cp(abs, dest);
+          files++;
+        }
+      };
+      await walk(srcRoot);
+      const historyPath = join(updatesDir, "history.json");
+      let history = [];
+      try {
+        history = JSON.parse(await readFile(historyPath, "utf8"));
+      } catch {
+        history = [];
+      }
+      history.push({
+        at: Date.now(),
+        from: oldVersion,
+        to: version,
+        files,
+        backup: backupDir,
+      });
+      await writeFile(
+        historyPath,
+        JSON.stringify(history.slice(-50), null, 2),
+      );
+      return { installed_version: version, backup_dir: backupDir, files };
+    } finally {
+      await rm(extractDir, { recursive: true, force: true });
+    }
+  });
+  route("POST", "/update/build", async (req) => {
+    verifyUpdateCode(req, "build", body(req).code);
+    const job = newJob();
+    void (async () => {
+      try {
+        log(job, "info", "开始安装依赖（npm install）…");
+        await runJobCommand(job, "npm", ["install", "--no-audit", "--no-fund"]);
+        log(job, "info", "依赖安装完成，开始编译（npm run build）…");
+        await runJobCommand(job, "npm", ["run", "build"]);
+        log(job, "info", "编译完成。");
+        job.status = "done";
+      } catch (error) {
+        job.status = "failed";
+        job.error = error instanceof Error ? error.message : String(error);
+        log(job, "error", "编译失败：" + job.error);
+      }
+    })();
+    return { job_id: job.id };
+  });
+  route("POST", "/update/start", async (req) => {
+    verifyUpdateCode(req, "start", body(req).code);
+    const child = spawn("npm", ["start"], {
+      cwd: installRoot,
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+      shell: process.platform === "win32",
+    });
+    child.unref();
+    return { started: true, pid: child.pid ?? null };
+  });
+  route("POST", "/update/stop", async (req) => {
+    verifyUpdateCode(req, "stop", body(req).code);
+    setTimeout(() => {
+      void app.close().finally(() => process.exit(0));
+    }, 400);
+    return { stopping: true };
   });
 }
