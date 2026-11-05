@@ -20,6 +20,7 @@ import {
   date,
   Feedback,
   Heading,
+  Modal,
   PreviewDialog,
   ConfirmDialog,
   State,
@@ -120,6 +121,7 @@ export function Accounts({
   const [accessTokenId, setAccessTokenId] = useState<string | null>(null);
   const [accessFormat, setAccessFormat] = useState<McpFormat>("opencode");
   const [pending, setPending] = useState<Pending | null>(null);
+  const [deleting, setDeleting] = useState<Account | null>(null);
   const accessRef = useRef<HTMLDetailsElement | null>(null);
   type TokenResponse = {
     id?: string;
@@ -524,26 +526,35 @@ export function Accounts({
                   <strong>{a.name}</strong>
                   <small>{a.id}</small>
                 </div>
-                <button
-                  disabled={action.busy}
-                  onClick={() =>
-                    void action.run(async () => {
-                      const value = await api<Preview>(
-                        "/accounts/" + a.id + "/enable-preview",
-                        "POST",
-                        writeBody({}),
-                      );
-                      setPending({
-                        title: "重新启用原账户",
-                        value,
-                        path: "/tokens",
-                        body: { subject_id: a.id, label: a.name },
-                      });
-                    }, "")
-                  }
-                >
-                  重新启用…
-                </button>
+                <div className="row-actions">
+                  <button
+                    disabled={action.busy}
+                    onClick={() =>
+                      void action.run(async () => {
+                        const value = await api<Preview>(
+                          "/accounts/" + a.id + "/enable-preview",
+                          "POST",
+                          writeBody({}),
+                        );
+                        setPending({
+                          title: "重新启用原账户",
+                          value,
+                          path: "/tokens",
+                          body: { subject_id: a.id, label: a.name },
+                        });
+                      }, "")
+                    }
+                  >
+                    重新启用…
+                  </button>
+                  <button
+                    className="danger-outline"
+                    disabled={action.busy}
+                    onClick={() => setDeleting(a)}
+                  >
+                    彻底删除…
+                  </button>
+                </div>
               </div>
             ))}
         </State>
@@ -584,7 +595,159 @@ export function Accounts({
           </pre>
         </ConfirmDialog>
       )}
+      {deleting && (
+        <DeleteAccountDialog
+          account={deleting}
+          onClose={() => setDeleting(null)}
+          onDeleted={onChange}
+        />
+      )}
     </>
+  );
+}
+function DeleteAccountDialog({
+  account,
+  onClose,
+  onDeleted,
+}: {
+  account: Account;
+  onClose: () => void;
+  onDeleted: () => void;
+}) {
+  const [stage, setStage] = useState<"loading" | "ready" | "error" | "done">(
+    "loading",
+  );
+  const [code, setCode] = useState("");
+  const [input, setInput] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const errorText = (e: unknown) =>
+    e instanceof Error ? e.message : String(e);
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      try {
+        const result = await api<{ code: string; expires_at: number }>(
+          "/accounts/" + account.id + "/delete-preview",
+          "POST",
+          writeBody({}),
+        );
+        if (!alive) return;
+        setCode(result.code);
+        setStage("ready");
+      } catch (e) {
+        if (!alive) return;
+        setError(errorText(e));
+        setStage("error");
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [account.id]);
+  async function submit() {
+    setBusy(true);
+    setError("");
+    try {
+      await api(
+        "/accounts/" + account.id + "/delete",
+        "POST",
+        writeBody({ code: input }),
+      );
+      setStage("done");
+    } catch (e) {
+      setError(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Modal title="彻底删除账户" onClose={onClose} locked>
+      {stage === "loading" && <p>正在生成验证码…</p>}
+      {stage === "error" && (
+        <>
+          <div className="notice error" role="alert">
+            {error}
+          </div>
+          <div className="form-actions">
+            <button onClick={onClose}>关闭</button>
+          </div>
+        </>
+      )}
+      {stage === "done" ? (
+        <>
+          <div className="notice success" role="status">
+            账户及其全部数据已彻底删除。
+          </div>
+          <div className="form-actions">
+            <button
+              className="primary"
+              onClick={() => {
+                onDeleted();
+                onClose();
+              }}
+            >
+              完成
+            </button>
+          </div>
+        </>
+      ) : (
+        stage === "ready" && (
+          <>
+            <p>
+              将永久删除账户「{account.name}」及其名下全部记忆、关联与凭据，
+              <strong>不可恢复</strong>。
+            </p>
+            <label>
+              本次验证码（5 分钟内有效）
+              <code
+                aria-label="删除验证码"
+                style={{
+                  display: "inline-block",
+                  padding: "6px 14px",
+                  fontSize: 22,
+                  letterSpacing: 6,
+                  fontWeight: 700,
+                  alignSelf: "flex-start",
+                }}
+              >
+                {code}
+              </code>
+            </label>
+            <label>
+              输入验证码
+              <input
+                inputMode="numeric"
+                maxLength={6}
+                value={input}
+                autoFocus
+                placeholder="输入上方 6 位数字"
+                onChange={(e) =>
+                  setInput(e.target.value.replace(/\D/g, "").slice(0, 6))
+                }
+              />
+            </label>
+            {error && (
+              <div className="notice error" role="alert">
+                {error}
+              </div>
+            )}
+            <div className="form-actions">
+              <button onClick={onClose} disabled={busy}>
+                取消
+              </button>
+              <button
+                className="danger"
+                disabled={busy || input.length !== 6}
+                onClick={() => void submit()}
+              >
+                确认彻底删除
+              </button>
+            </div>
+          </>
+        )
+      )}
+    </Modal>
   );
 }
 export function Transfer({ subject }: { subject: string }) {

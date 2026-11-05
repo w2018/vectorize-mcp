@@ -791,6 +791,72 @@ export class Store {
       };
     });
   }
+  /** Target checks for permanently deleting an unbound account. */
+  unboundAccount(subjectId: string) {
+    const s = this.row(
+      "SELECT id,label,kind,access_state FROM subjects WHERE id=?",
+      subjectId,
+    );
+    check(s, "NOT_FOUND", "账户不存在");
+    check(
+      !this.row(
+        "SELECT id FROM tokens WHERE subject_id=? AND status=?",
+        subjectId,
+        "active",
+      ),
+      "REVISION_CONFLICT",
+      "该账户仍有有效凭据，请先撤销后再彻底删除",
+    );
+    return {
+      subject_id: String(s!.id),
+      label: String(s!.label),
+      kind: String(s!.kind),
+      stats: this.stats(subjectId),
+    };
+  }
+  /** Permanently delete an unbound account and everything it owns. Irreversible. */
+  deleteAccount(subjectId: string) {
+    return this.tx(() => {
+      this.unboundAccount(subjectId);
+      const memoryIds = this.rows(
+        "SELECT id FROM memories WHERE subject_id=?",
+        subjectId,
+      ).map((r) => String(r.id));
+      const counts = {
+        memories: memoryIds.length,
+        tokens: Number(
+          (this.row("SELECT count(*) n FROM tokens WHERE subject_id=?", subjectId) as { n: number }).n,
+        ),
+        links: Number(
+          (this.row("SELECT count(*) n FROM links WHERE subject_id=?", subjectId) as { n: number }).n,
+        ),
+      };
+      // Break self-references before deleting so the merged_into foreign key never blocks.
+      this.db.prepare("UPDATE memories SET merged_into=NULL WHERE subject_id=?").run(subjectId);
+      this.db.prepare("DELETE FROM links WHERE subject_id=?").run(subjectId);
+      if (memoryIds.length) {
+        const marks = memoryIds.map(() => "?").join(",");
+        this.db.prepare(`DELETE FROM vectors WHERE memory_id IN (${marks})`).run(...memoryIds);
+        this.db.prepare(`DELETE FROM query_terms WHERE memory_id IN (${marks})`).run(...memoryIds);
+        this.db.prepare(`DELETE FROM versions WHERE memory_id IN (${marks})`).run(...memoryIds);
+      }
+      this.db.prepare("DELETE FROM memory_fts WHERE subject_id=?").run(subjectId);
+      this.db.prepare("DELETE FROM bot_profiles WHERE subject_id=?").run(subjectId);
+      this.db.prepare("DELETE FROM tokens WHERE subject_id=?").run(subjectId);
+      this.db.prepare("DELETE FROM memories WHERE subject_id=?").run(subjectId);
+      this.db.prepare("DELETE FROM imports WHERE subject_id=?").run(subjectId);
+      this.db.prepare("DELETE FROM previews WHERE json_extract(payload,'$.subjectId')=?").run(subjectId);
+      this.db.prepare("DELETE FROM dedup WHERE json_extract(response,'$.subject_id')=?").run(subjectId);
+      this.db.prepare("DELETE FROM subjects WHERE id=?").run(subjectId);
+      this.trashVault().purgeSubject(subjectId);
+      this.audit(
+        { subjectId: "system", tokenId: "admin", admin: true },
+        "account.delete",
+        [subjectId],
+      );
+      return { deleted: true as const, subject_id: subjectId, ...counts };
+    });
+  }
   private trashVault(): TrashVault {
     check(this.trash, "DATABASE_UNAVAILABLE");
     return this.trash!;

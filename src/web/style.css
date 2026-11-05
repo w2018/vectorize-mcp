@@ -1255,6 +1255,9 @@ td button {
   border: 1px solid #e3ecdc;
   border-radius: 14px;
   align-self: stretch;
+  /* 控制台内容过多时自身滚动，不再把网格行撑高，保证与画布严格等高。 */
+  min-height: 0;
+  overflow-y: auto;
 }
 .graph-side label {
   display: flex;
@@ -1294,6 +1297,13 @@ td button {
   height: 100%;
   overflow: hidden;
   border-radius: 14px;
+  /* 用 flex 让画布/空态撑满网格行，避免内层百分比高度失效留下白边。 */
+  display: flex;
+}
+.graph-stage > * {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
 }
 .graph-detail {
   position: absolute;
@@ -1405,6 +1415,20 @@ td button {
 .inline-form input {
   flex: 1;
   min-width: 0;
+}
+/* 复选框是行内控件，不能被 flex 拉伸成整行的输入框。 */
+.inline-form input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  min-width: 0;
+}
+.inline-form label.check {
+  flex: 0 0 auto;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
 }
 .job-log {
   display: flex;

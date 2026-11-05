@@ -4,7 +4,13 @@ import type {
   FastifyReply,
   HTTPMethods,
 } from "fastify";
-import { randomBytes, randomUUID, scrypt, timingSafeEqual } from "node:crypto";
+import {
+  randomBytes,
+  randomInt,
+  randomUUID,
+  scrypt,
+  timingSafeEqual,
+} from "node:crypto";
 import { existsSync, unlinkSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -381,6 +387,47 @@ export async function registerAdmin(
   route("POST", "/accounts/:id/enable-preview", async (req) =>
     write("enablePreview", param(req)),
   );
+  const deletions = new Map<
+    string,
+    { code: string; session: string; expires: number; attempts: number }
+  >();
+  route("POST", "/accounts/:id/delete-preview", async (req) => {
+    const target = await read<RecordData>("unboundAccount", param(req));
+    const code = String(randomInt(0, 1000000)).padStart(6, "0");
+    const expires = Date.now() + 300000;
+    deletions.set(String(target.subject_id), {
+      code,
+      session: current(req)!.id,
+      expires,
+      attempts: 0,
+    });
+    return { ...target, code, expires_at: expires };
+  });
+  route("POST", "/accounts/:id/delete", async (req) => {
+    const id = param(req);
+    const input = text((req.body as RecordData)?.code);
+    const entry = deletions.get(id);
+    if (
+      !entry ||
+      entry.session !== current(req)!.id ||
+      entry.expires < Date.now() ||
+      entry.attempts >= 5
+    ) {
+      deletions.delete(id);
+      throw new DomainError("PREVIEW_EXPIRED", "验证码已失效，请重新获取");
+    }
+    entry.attempts++;
+    const given = Buffer.from(input);
+    const expected = Buffer.from(entry.code);
+    if (
+      given.length !== expected.length ||
+      !timingSafeEqual(given, expected)
+    )
+      throw new DomainError("FORBIDDEN", "验证码不正确");
+    const result = await write<RecordData>("deleteAccount", id);
+    deletions.delete(id);
+    return result;
+  });
   route("GET", "/qqbot/presets", async () => ({ items: BOT_PRESETS }));
   route("GET", "/qqbot", async (req) =>
     read("botProfile", subject(query(req))),

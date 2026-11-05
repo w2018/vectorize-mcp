@@ -102,6 +102,12 @@ export class TrashVault {
     tx(ids);
     return { deleted, missing };
   }
+  /** Remove every snapshot that belonged to a permanently deleted account. */
+  purgeSubject(subjectId: string) {
+    return this.db
+      .prepare("DELETE FROM trash WHERE source_subject_id=?")
+      .run(subjectId).changes;
+  }
   reconcile(sourceExists: (kind: TrashKind, targetId: string) => boolean) {
     const rows = this.db
       .prepare("SELECT id,kind,target_id,state FROM trash WHERE state='pending'")
