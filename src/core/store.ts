@@ -2312,12 +2312,24 @@ export class Store {
     );
     check((input.keywords ?? []).length <= 12);
     for (const k of input.keywords ?? []) this.text(k, 1, 32);
-    const terms = [
-        ...new Set(
-          (input.keywords ?? []).map((k) => normalize(k).toLowerCase()),
-        ),
-      ],
-      now = Date.now();
+    // 检索词来自 keywords + query 本身；中文额外拆 2 字词，避免「必须显式给 keywords 才命中」。
+    const terms: string[] = [];
+    const addTerm = (value: string) => {
+      const token = normalize(value).toLowerCase();
+      if (token && !terms.includes(token)) terms.push(token);
+    };
+    const queryParts: string[] = [...(input.keywords ?? [])];
+    for (const piece of input.query.split(/[^\p{L}\p{N}]+/u))
+      if (piece) queryParts.push(piece);
+    for (const part of queryParts) {
+      addTerm(part);
+      const chars = [...part];
+      if (chars.length >= 2 && /[\u4e00-\u9fff]/.test(part))
+        for (let i = 0; i < chars.length - 1; i++)
+          addTerm(chars[i] + chars[i + 1]);
+    }
+    if (terms.length > 60) terms.length = 60;
+    const now = Date.now();
     const ftsIds = new Set<string>();
     if (terms.length) {
       const expression = terms
@@ -2348,9 +2360,8 @@ export class Store {
       const hay = normalize(
           [m.content, m.title, ...m.keywords].join(" "),
         ).toLowerCase(),
-        lexical = terms.length
-          ? terms.filter((t) => hay.includes(t)).length / terms.length
-          : 0;
+        matched = terms.filter((t) => hay.includes(t)).length,
+        lexical = terms.length ? matched / terms.length : 0;
       let relevance = lexical,
         mode: "semantic" | "lexical" = "lexical";
       if (input.embedding) {
@@ -2384,7 +2395,7 @@ export class Store {
         relevance <
         (mode === "semantic"
           ? config.semanticThreshold
-          : config.lexicalThreshold)
+          : Math.min(config.lexicalThreshold, 0.2))
       )
         continue;
       m.weight = weight(m, config, now);
