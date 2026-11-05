@@ -5,8 +5,11 @@ import type {
   HTTPMethods,
 } from "fastify";
 import { randomBytes, randomUUID, scrypt, timingSafeEqual } from "node:crypto";
+import { existsSync, unlinkSync } from "node:fs";
 import { stat } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { WebdavCloud } from "./webdav.js";
 import type { DatabasePool } from "./database.js";
 import { BOT_PRESETS } from "../core/catalog.js";
 import {
@@ -42,6 +45,12 @@ function text(value: unknown): string {
   if (typeof value !== "string" || !value || value.length > 2048)
     throw new DomainError("VALIDATION_ERROR");
   return value;
+}
+function optionalText(value: unknown, max = 200): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value !== "string" || value.length > max)
+    throw new DomainError("VALIDATION_ERROR");
+  return value.trim();
 }
 function integer(value: unknown, fallback: number, max: number): number {
   if (value === undefined || value === "") return fallback;
@@ -409,12 +418,6 @@ export async function registerAdmin(
         : integer(q.token_budget, 600, 1200),
     );
   });
-  route("GET", "/spaces", async (req) => ({
-    items: await read("spaces", subject(query(req))),
-  }));
-  route("POST", "/spaces", async (req) =>
-    write("createSpace", subject(body(req)), text(body(req).name)),
-  );
   for (const path of ["/memories", "/profiles"])
     route("GET", path, async (req) => {
       const q = query(req),
@@ -426,7 +429,6 @@ export async function registerAdmin(
         {
           status: q.status || undefined,
           type: path === "/profiles" ? "profile" : q.type || undefined,
-          space_id: q.space_id || undefined,
           query: q.q || undefined,
           offset: start,
           limit,
@@ -446,7 +448,6 @@ export async function registerAdmin(
     const b = body(req),
       id = subject(b),
       ctx = await read<Context>("adminFor", id);
-    const spaces = await read<{ id: string }[]>("spaces", id);
     const { subject_id, ...input } = b;
     text(input.request_id);
     if (method === "update") object(input.patch);
@@ -457,7 +458,6 @@ export async function registerAdmin(
     }
     return write(method, ctx, {
       ...input,
-      scope: { space_ids: spaces.map((s) => s.id) },
       ...patch,
     });
   };
@@ -496,7 +496,6 @@ export async function registerAdmin(
   route("GET", "/graph", async (req) => {
     const q = query(req);
     return read("graph", subject(q), {
-      space_id: q.space_id || undefined,
       type: q.type || undefined,
       focus_id: q.focus_id || undefined,
       node_limit: integer(q.node_limit, 500, 500),
@@ -636,24 +635,255 @@ export async function registerAdmin(
     if (!found) throw new DomainError("NOT_FOUND");
     return found;
   };
-  const publicBackup = async (b: RecordData) => ({
-    id: b.id,
-    created_at: b.created_at,
-    sha256: b.sha256,
-    size: (await stat(text(b.path))).size,
-  });
+  const publicBackup = async (b: RecordData) => {
+    const path = text(b.path);
+    let size = 0;
+    try {
+      size = (await stat(path)).size;
+    } catch {
+      size = 0;
+    }
+    return {
+      id: b.id,
+      created_at: b.created_at,
+      sha256: b.sha256,
+      size,
+      label: typeof b.label === "string" ? b.label : "",
+      path,
+      kind: "local",
+    };
+  };
+  const cloud = new WebdavCloud(
+    join(dirname(options.backupDir), "webdav.json"),
+    join(dirname(options.backupDir), "webdav.key"),
+  );
+  const cloudError = (error: unknown): never => {
+    const status = (error as { status?: number }).status;
+    const raw = error instanceof Error ? error.message : String(error);
+    const code = raw.startsWith("WEBDAV_")
+      ? raw.replace(/[^A-Z_]/g, "").slice(0, 60) || "WEBDAV_ERROR"
+      : status === 401
+        ? "WEBDAV_AUTH_FAILED"
+        : "WEBDAV_ERROR";
+    throw new DomainError(code, raw.slice(0, 300));
+  };
+  interface CloudJob {
+    id: string;
+    status: "running" | "done" | "failed";
+    logs: { at: number; level: "info" | "warn" | "error"; text: string }[];
+    result?: RecordData;
+    error?: string;
+    started_at: number;
+  }
+  const jobs = new Map<string, CloudJob>();
+  const log = (job: CloudJob, level: "info" | "warn" | "error", text: string) => {
+    job.logs.push({ at: Date.now(), level, text });
+    if (job.logs.length > 200) job.logs.splice(0, job.logs.length - 200);
+  };
+  const megabytes = (bytes: number) => (bytes / 1024 / 1024).toFixed(2) + " MB";
+  const safeName = (value: string) =>
+    /^[\w.\-\u4e00-\u9fa5 ()]{1,120}\.sqlite$/i.test(value);
   route("GET", "/backups", async (req) => {
     const rows = await read<RecordData[]>("listBackups");
     return paged(await Promise.all(rows.map(publicBackup)), query(req));
   });
-  route("POST", "/backups", async () =>
-    publicBackup(
+  route("POST", "/backups", async (req) => {
+    const label = optionalText(
+      req.body && typeof req.body === "object"
+        ? (req.body as RecordData).label
+        : undefined,
+    );
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    return publicBackup(
       await write<RecordData>(
         "backup",
-        join(options.backupDir, randomUUID() + ".sqlite"),
+        join(options.backupDir, stamp + ".sqlite"),
+        label,
       ),
-    ),
+    );
+  });
+  route("POST", "/backups/label", async (req) => {
+    const b = body(req);
+    return publicBackup(
+      await write<RecordData>(
+        "updateBackupLabel",
+        text(b.backup_id),
+        optionalText(b.label),
+      ),
+    );
+  });
+  route("POST", "/backups/delete", async (req) => {
+    const id = text(body(req).backup_id);
+    const row = await write<RecordData>("deleteBackup", id);
+    const path = resolve(text(row.path));
+    const allowed = [resolve(options.backupDir), resolve(tmpdir())].some((dir) =>
+      path.startsWith(dir),
+    );
+    let removed = false;
+    if (allowed && existsSync(path)) {
+      unlinkSync(path);
+      removed = true;
+    }
+    return { deleted: true, file_removed: removed, path };
+  });
+  route("POST", "/backups/inspect", async (req) =>
+    write("inspectBackup", resolve(text(body(req).path))),
   );
+  route("GET", "/webdav", async () => cloud.status());
+  route("POST", "/webdav", async (req) => {
+    try {
+      return cloud.save(body(req));
+    } catch (error) {
+      return cloudError(error);
+    }
+  });
+  route("POST", "/webdav/test", async () => {
+    try {
+      return { ...(await cloud.test()), ...cloud.status() };
+    } catch (error) {
+      return cloudError(error);
+    }
+  });
+  route("GET", "/webdav/files", async () => {
+    try {
+      const items = await cloud.list();
+      return { items, total: items.length };
+    } catch (error) {
+      return cloudError(error);
+    }
+  });
+  route("POST", "/webdav/upload", async (req) => {
+    const label = optionalText(body(req).label);
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const name = stamp + ".sqlite";
+    const local = join(options.backupDir, name);
+    const row = await write<RecordData>("backup", local, label || "云端上传");
+    try {
+      const size = await cloud.upload(local, name);
+      return { uploaded: true, name, size, backup_id: row.id };
+    } catch (error) {
+      return cloudError(error);
+    }
+  });
+  route("POST", "/webdav/delete", async (req) => {
+    const name = text(body(req).name);
+    if (!safeName(name)) throw new DomainError("VALIDATION_ERROR");
+    try {
+      await cloud.remove(name);
+      return { deleted: true, name };
+    } catch (error) {
+      return cloudError(error);
+    }
+  });
+  route("GET", "/webdav/jobs/:id", async (req) => {
+    const job = jobs.get(param(req));
+    if (!job) throw new DomainError("NOT_FOUND");
+    return {
+      id: job.id,
+      status: job.status,
+      logs: job.logs,
+      result: job.result ?? null,
+      error: job.error ?? null,
+      started_at: job.started_at,
+    };
+  });
+  route("POST", "/webdav/restore", async (req) => {
+    const name = text(body(req).name);
+    if (!safeName(name)) throw new DomainError("VALIDATION_ERROR");
+    for (const [id, job] of jobs)
+      if (job.status !== "running" && Date.now() - job.started_at > 30 * 60 * 1000)
+        jobs.delete(id);
+    const job: CloudJob = {
+      id: randomUUID(),
+      status: "running",
+      logs: [],
+      started_at: Date.now(),
+    };
+    jobs.set(job.id, job);
+    void (async () => {
+      const destination = join(
+        tmpdir(),
+        "vectorize-mcp-cloud-" + randomUUID() + ".sqlite",
+      );
+      try {
+        log(job, "info", "正在连接云端目录…");
+        await cloud.test();
+        log(job, "info", "连接成功，开始下载 " + name);
+        let lastPercent = -1;
+        const size = await cloud.download(name, destination, (done, total) => {
+          const percent = total ? Math.floor((done / total) * 100) : 0;
+          if (percent === lastPercent || percent % 10 !== 0) return;
+          lastPercent = percent;
+          log(
+            job,
+            "info",
+            "已下载 " + percent + "%（" + megabytes(done) + " / " + megabytes(total) + "）",
+          );
+        });
+        log(job, "info", "下载完成，共 " + megabytes(size) + "，开始校验完整性…");
+        const report = (await write<RecordData>(
+          "inspectBackup",
+          destination,
+        )) as RecordData & { counts?: RecordData; schema_version?: string };
+        log(
+          job,
+          report.integrity ? "info" : "error",
+          "完整性检查：" + (report.integrity ? "通过" : "损坏"),
+        );
+        log(
+          job,
+          Number(report.foreign_key_violations) === 0 ? "info" : "warn",
+          "外键一致性：" + String(report.foreign_key_violations) + " 处异常",
+        );
+        log(job, "info", "数据结构版本：" + String(report.schema_version ?? "未知"));
+        log(
+          job,
+          "info",
+          "内含 " +
+            String(report.counts?.accounts ?? 0) +
+            " 个账户、" +
+            String(report.counts?.memories ?? 0) +
+            " 条记忆、" +
+            String(report.counts?.links ?? 0) +
+            " 条关联",
+        );
+        if (!report.integrity) throw new Error("备份文件完整性校验失败");
+        if (String(report.schema_version) !== "3")
+          throw new Error("数据结构版本不匹配，请使用 v0.2.2 之后的备份");
+        log(job, "info", "登记为可恢复快照并生成恢复预检…");
+        const registered = await write<RecordData>(
+          "registerBackup",
+          destination,
+          "云端：" + name,
+        );
+        const preview = (await write<RecordData>(
+          "restorePreview",
+          destination,
+        )) as RecordData;
+        log(job, "warn", "恢复会撤销全部访问凭据，需要重新签发 Token。");
+        job.result = {
+          backup_id: registered.id,
+          backup_name: name,
+          path: destination,
+          report,
+          preview,
+        };
+        job.status = "done";
+      } catch (error) {
+        job.status = "failed";
+        job.error = error instanceof Error ? error.message : String(error);
+        log(job, "error", "恢复预检失败：" + job.error);
+        if (existsSync(destination)) {
+          try {
+            unlinkSync(destination);
+          } catch {
+            /* 临时文件清理失败不影响预检结果 */
+          }
+        }
+      }
+    })();
+    return { job_id: job.id, status: job.status };
+  });
   route("POST", "/restores/preview", async (req) => {
     const b = await backup(text(body(req).backup_id));
     const { path, ...preview } = await write<RecordData>(

@@ -7,11 +7,14 @@ import {
   type Account,
   type Audit,
   type Backup,
+  type CloudFile,
+  type CloudJob,
   type Config,
   type BotPreset,
   type Page,
   type Preview,
   type Token,
+  type WebdavStatus,
 } from "./api";
 import {
   date,
@@ -717,24 +720,95 @@ export function Backups({ refresh }: { refresh: number }) {
     backup_id: string;
     value: Preview;
   } | null>(null);
+  const [labelFor, setLabelFor] = useState<string | null>(null);
+  const [labelDraft, setLabelDraft] = useState("");
+  const [removing, setRemoving] = useState<Backup | null>(null);
+  const [cloudOpen, setCloudOpen] = useState(false);
+  const [cloudVersion, setCloudVersion] = useState(0);
+  const cloud = useResource<WebdavStatus>("/webdav", refresh + cloudVersion);
+  const [form, setForm] = useState({
+    provider: "jianguoyun" as "jianguoyun" | "custom",
+    url: "https://dav.jianguoyun.com/dav/",
+    username: "",
+    password: "",
+    root: "vectorize-mcp",
+  });
+  const [formLoaded, setFormLoaded] = useState(false);
+  if (!formLoaded && cloud.data) {
+    setFormLoaded(true);
+    setForm({
+      provider: cloud.data.provider,
+      url: cloud.data.url,
+      username: cloud.data.username,
+      password: "",
+      root: cloud.data.root,
+    });
+  }
+  const [files, setFiles] = useState<CloudFile[] | null>(null);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [job, setJob] = useState<CloudJob | null>(null);
+  useEffect(() => {
+    if (!jobId) return;
+    let live = true;
+    const timer = window.setInterval(() => {
+      void api<CloudJob>("/webdav/jobs/" + jobId)
+        .then((next) => {
+          if (!live) return;
+          setJob(next);
+          if (next.status !== "running") window.clearInterval(timer);
+        })
+        .catch(() => undefined);
+    }, 600);
+    return () => {
+      live = false;
+      window.clearInterval(timer);
+    };
+  }, [jobId]);
+  const loadFiles = () =>
+    action.run(async () => {
+      const result = await api<{ items: CloudFile[] }>("/webdav/files");
+      setFiles(result.items);
+    }, "云端列表已刷新");
+  const startRestore = (name: string) =>
+    action.run(async () => {
+      setJob(null);
+      const started = await api<{ job_id: string }>(
+        "/webdav/restore",
+        "POST",
+        writeBody({ name }),
+      );
+      setJobId(started.job_id);
+    }, "");
   return (
     <>
       <Heading
         eyebrow="RECOVERY"
         title="备份与恢复"
-        description="备份是整个数据库的一致性快照，与单账户的数据导出不同。"
+        description="备份是整个数据库的一致性快照，与单账户的数据导出不同。本地备份留在服务器，云端备份可以多存一份到 WebDAV。"
       >
         <button
           className="primary"
           disabled={action.busy}
           onClick={() =>
             void action.run(async () => {
-              await api("/backups", "POST", writeBody({}));
+              await api("/backups", "POST", writeBody({ label: "" }));
               setVersion((v) => v + 1);
             }, "备份已创建并校验")
           }
         >
-          创建备份
+          立即备份到本地
+        </button>
+        <button
+          disabled={action.busy}
+          onClick={() =>
+            void action.run(async () => {
+              await api("/webdav/upload", "POST", writeBody({ label: "" }));
+              setVersion((v) => v + 1);
+              setFiles(null);
+            }, "已上传一份备份到云端")
+          }
+        >
+          上传到云端
         </button>
       </Heading>
       <Feedback error={action.error} notice={action.notice} />
@@ -743,6 +817,7 @@ export function Backups({ refresh }: { refresh: number }) {
         凭据。完成后需要重新登录，为账户签发新凭据。
       </div>
       <section className="panel padded">
+        <h3>本地备份（{backups.data?.items.length ?? 0} 份）</h3>
         <State
           loading={backups.loading}
           error={backups.error}
@@ -751,36 +826,308 @@ export function Backups({ refresh }: { refresh: number }) {
           {backups.data?.items.map((b) => (
             <div className="list-row" key={b.id}>
               <div>
-                <strong>{date(b.created_at)}</strong>
+                <strong>{b.label || date(b.created_at)}</strong>
                 <small>
-                  {b.id} · {(b.size / 1024 / 1024).toFixed(2)} MiB
+                  {date(b.created_at)} · {(b.size / 1024 / 1024).toFixed(2)} MiB
                 </small>
-                <small>
-                  校验：
-                  {b.verified_at ? date(b.verified_at) : "以恢复预检结果为准"}
-                </small>
+                <small title={b.path}>存放位置：{b.path || "—"}</small>
               </div>
-              <button
-                disabled={action.busy}
-                onClick={() =>
-                  void action.run(async () => {
-                    setPending({
-                      backup_id: b.id,
-                      value: await api<Preview>(
-                        "/restores/preview",
-                        "POST",
-                        writeBody({ backup_id: b.id }),
-                      ),
-                    });
-                  }, "")
-                }
-              >
-                预检恢复…
-              </button>
+              <div className="row-actions">
+                <button
+                  disabled={action.busy}
+                  onClick={() => {
+                    setLabelFor(b.id);
+                    setLabelDraft(b.label || "");
+                  }}
+                >
+                  {b.label ? "改描述" : "加描述"}
+                </button>
+                <button
+                  disabled={action.busy}
+                  onClick={() =>
+                    void action.run(async () => {
+                      setPending({
+                        backup_id: b.id,
+                        value: await api<Preview>(
+                          "/restores/preview",
+                          "POST",
+                          writeBody({ backup_id: b.id }),
+                        ),
+                      });
+                    }, "")
+                  }
+                >
+                  预检恢复…
+                </button>
+                <button
+                  className="danger"
+                  disabled={action.busy}
+                  onClick={() => setRemoving(b)}
+                >
+                  删除
+                </button>
+              </div>
+              {labelFor === b.id && (
+                <div className="inline-form">
+                  <input
+                    aria-label={"备份描述 " + b.id}
+                    value={labelDraft}
+                    maxLength={200}
+                    placeholder="例如：升级前、周末例行"
+                    onChange={(event) => setLabelDraft(event.target.value)}
+                  />
+                  <button
+                    className="primary"
+                    disabled={action.busy}
+                    onClick={() =>
+                      void action.run(async () => {
+                        await api(
+                          "/backups/label",
+                          "POST",
+                          writeBody({ backup_id: b.id, label: labelDraft }),
+                        );
+                        setLabelFor(null);
+                        setVersion((v) => v + 1);
+                      }, "描述已保存")
+                    }
+                  >
+                    保存
+                  </button>
+                  <button onClick={() => setLabelFor(null)}>关闭</button>
+                </div>
+              )}
             </div>
           ))}
         </State>
       </section>
+      <section className="panel padded">
+        <div className="section-head">
+          <h3>云端备份（WebDAV）</h3>
+          <button onClick={() => setCloudOpen((open) => !open)}>
+            {cloudOpen ? "收起设置" : "设置云端"}
+          </button>
+        </div>
+        <p className="hint">
+          {cloud.data?.configured
+            ? "已连接：" +
+              (cloud.data.presets.find((item) => item.key === cloud.data?.provider)
+                ?.label ?? cloud.data.provider) +
+              " · 目录 " +
+              cloud.data.root +
+              " · 账号 " +
+              cloud.data.username
+            : "还没有配置云端。配置后可以把备份另存到坚果云等 WebDAV 网盘。"}
+        </p>
+        {cloudOpen && (
+          <div className="form-grid">
+            <label>
+              <span>网盘类型</span>
+              <select
+                aria-label="网盘类型"
+                value={form.provider}
+                onChange={(event) => {
+                  const provider = event.target.value as "jianguoyun" | "custom";
+                  const preset = cloud.data?.presets.find(
+                    (item) => item.key === provider,
+                  );
+                  setForm((current) => ({
+                    ...current,
+                    provider,
+                    url: preset?.url || current.url,
+                  }));
+                }}
+              >
+                {(cloud.data?.presets ?? []).map((preset) => (
+                  <option key={preset.key} value={preset.key}>
+                    {preset.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>服务地址</span>
+              <input
+                aria-label="WebDAV 地址"
+                value={form.url}
+                onChange={(event) =>
+                  setForm((current) => ({ ...current, url: event.target.value }))
+                }
+              />
+            </label>
+            <label>
+              <span>登录账号</span>
+              <input
+                aria-label="WebDAV 账号"
+                value={form.username}
+                onChange={(event) =>
+                  setForm((current) => ({
+                    ...current,
+                    username: event.target.value,
+                  }))
+                }
+              />
+            </label>
+            <label>
+              <span>登录密码 / 应用密码</span>
+              <input
+                aria-label="WebDAV 密码"
+                type="password"
+                placeholder={cloud.data?.has_password ? "已保存，留空表示不修改" : ""}
+                value={form.password}
+                onChange={(event) =>
+                  setForm((current) => ({
+                    ...current,
+                    password: event.target.value,
+                  }))
+                }
+              />
+            </label>
+            <label>
+              <span>云端目录</span>
+              <input
+                aria-label="云端目录"
+                value={form.root}
+                onChange={(event) =>
+                  setForm((current) => ({ ...current, root: event.target.value }))
+                }
+              />
+            </label>
+            <div className="form-actions">
+              <button
+                className="primary"
+                disabled={action.busy}
+                onClick={() =>
+                  void action.run(async () => {
+                    await api("/webdav", "POST", writeBody(form));
+                    setForm((current) => ({ ...current, password: "" }));
+                    setCloudVersion((v) => v + 1);
+                  }, "云端设置已保存")
+                }
+              >
+                保存设置
+              </button>
+              <button
+                disabled={action.busy}
+                onClick={() =>
+                  void action.run(async () => {
+                    await api("/webdav/test", "POST", writeBody({}));
+                  }, "连接成功，云端目录已就绪")
+                }
+              >
+                测试连接
+              </button>
+              <button disabled={action.busy} onClick={() => void loadFiles()}>
+                刷新云端列表
+              </button>
+            </div>
+          </div>
+        )}
+        {files && (
+          <div className="card-list">
+            {files.length ? (
+              files.map((file) => (
+                <div className="list-row" key={file.name}>
+                  <div>
+                    <strong>{file.name}</strong>
+                    <small>
+                      {(file.size / 1024 / 1024).toFixed(2)} MiB ·{" "}
+                      {new Date(file.modified_at).toLocaleString("zh-CN")}
+                    </small>
+                  </div>
+                  <div className="row-actions">
+                    <button
+                      disabled={action.busy}
+                      onClick={() => startRestore(file.name)}
+                    >
+                      检测并恢复…
+                    </button>
+                    <button
+                      className="danger"
+                      disabled={action.busy}
+                      onClick={() =>
+                        void action.run(async () => {
+                          await api(
+                            "/webdav/delete",
+                            "POST",
+                            writeBody({ name: file.name }),
+                          );
+                          await loadFiles();
+                        }, "云端备份已删除")
+                      }
+                    >
+                      删除
+                    </button>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <p className="hint">云端目录里还没有备份，点上方“上传到云端”。</p>
+            )}
+          </div>
+        )}
+      </section>
+      {removing && (
+        <ConfirmDialog
+          title="删除这份本地备份？"
+          confirmLabel="删除备份"
+          disabled={action.busy}
+          onClose={() => {
+            setRemoving(null);
+            setVersion((v) => v + 1);
+          }}
+          onConfirm={async () => {
+            await api(
+              "/backups/delete",
+              "POST",
+              writeBody({ backup_id: removing.id }),
+            );
+          }}
+        >
+          <p>
+            {removing.label || date(removing.created_at)} 会连同备份文件一起删除，
+            删除后无法找回这份快照。
+          </p>
+          <p className="hint">存放位置：{removing.path || "—"}</p>
+        </ConfirmDialog>
+      )}
+      {job && (
+        <ConfirmDialog
+          title="云端备份检测与恢复"
+          confirmLabel="确认恢复"
+          disabled={job.status !== "done"}
+          onClose={() => {
+            setJob(null);
+            setJobId(null);
+          }}
+          onConfirm={async () => {
+            if (!job.result) throw new Error("预检尚未完成");
+            await api(
+              "/restores/execute",
+              "POST",
+              writeBody({
+                backup_id: job.result.backup_id,
+                preview_token: job.result.preview.preview_token,
+              }),
+            );
+            window.dispatchEvent(new Event("session-expired"));
+          }}
+        >
+          <div className="job-log">
+            {job.logs.map((line, index) => (
+              <p key={index} className={"log-" + line.level}>
+                {new Date(line.at).toLocaleTimeString("zh-CN")} · {line.text}
+              </p>
+            ))}
+            {job.status === "running" && <p className="hint">正在处理，请稍候…</p>}
+            {job.status === "failed" && <p className="log-error">失败：{job.error}</p>}
+            {job.status === "done" && (
+              <p className="hint">
+                校验通过。确认恢复后，所有旧访问凭据都会失效，需要重新登录。
+              </p>
+            )}
+          </div>
+        </ConfirmDialog>
+      )}
       {pending && (
         <PreviewDialog
           title="确认恢复整个数据库"
@@ -807,6 +1154,7 @@ export function Backups({ refresh }: { refresh: number }) {
     </>
   );
 }
+
 const fields: {
   key: keyof Config;
   label: string;

@@ -1,6 +1,6 @@
 {
   "name": "vectorize-mcp",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "type": "module",
   "engines": {
@@ -29,6 +29,7 @@
     "react-dom": "19.3.1",
     "sqlite-vec": "0.1.9",
     "three": "^0.183.2",
+    "webdav": "^5.9.0",
     "zod": "4.6.7"
   },
   "devDependencies": {
@@ -45,3 +46,4 @@
     "vite": "8.3.5"
   }
 }
+

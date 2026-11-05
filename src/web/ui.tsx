@@ -60,10 +60,13 @@ export function Modal({
   title,
   children,
   onClose,
+  locked = false,
 }: {
   title: string;
   children: ReactNode;
   onClose: () => void;
+  /** 只允许点右上角关闭：吞掉 ESC，遮罩点击本来就不会关闭。 */
+  locked?: boolean;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
@@ -75,7 +78,7 @@ export function Modal({
       ref={ref}
       onCancel={(e) => {
         e.preventDefault();
-        onClose();
+        if (!locked) onClose();
       }}
     >
       <header>

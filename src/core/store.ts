@@ -13,6 +13,7 @@ import {
   existsSync,
   copyFileSync,
   rmSync,
+  statSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { schema } from "./schema.js";
@@ -44,7 +45,6 @@ import type {
   SearchItem,
   GetInput,
   PreparedSearch,
-  Scope,
   ExportPayload,
   MemoryLink,
   TrashItemSummary,
@@ -141,13 +141,13 @@ export class Store {
         "SELECT value FROM metadata WHERE key=?",
         "schema_version",
       );
-      check(version?.value === "2", "SCHEMA_UNSUPPORTED");
+      check(version?.value === "3", "SCHEMA_UNSUPPORTED");
     }
     if (!options.readonly) {
       this.db.exec(schema);
       this.db
         .prepare("INSERT OR IGNORE INTO metadata VALUES (?,?)")
-        .run("schema_version", "2");
+        .run("schema_version", "3");
       this.db
         .prepare("INSERT OR IGNORE INTO metadata VALUES (?,?)")
         .run("config", JSON.stringify(defaults));
@@ -326,37 +326,6 @@ export class Store {
       authEpoch: Number(subject.auth_epoch),
     };
   }
-  spaces(subjectId: string) {
-    this.adminFor(subjectId);
-    return this.rows(
-      "SELECT * FROM spaces WHERE subject_id=? ORDER BY name",
-      subjectId,
-    );
-  }
-  createSpace(subjectId: string, name: string) {
-    this.adminFor(subjectId);
-    this.text(name, 1, 80);
-    const id = randomUUID();
-    this.db
-      .prepare("INSERT INTO spaces VALUES (?,?,?)")
-      .run(id, subjectId, name);
-    return { id, subject_id: subjectId, name };
-  }
-  private spaceIds(ctx: Context, scope?: Scope, spaceId?: string) {
-    const all = this.spaces(ctx.subjectId);
-    const ids = spaceId
-      ? [spaceId]
-      : (scope?.space_ids ?? [
-          String(all.find((x) => x.name === "default")!.id),
-        ]);
-    check(ids.length > 0 && ids.length <= 100);
-    for (const id of ids)
-      check(
-        all.some((x) => x.id === id),
-        "NOT_FOUND",
-      );
-    return ids;
-  }
   listTokens(): TokenInfo[] {
     return this.rows(
       "SELECT id,subject_id,label,status,revision,created_at,revoked_at FROM tokens ORDER BY created_at DESC",
@@ -473,10 +442,7 @@ export class Store {
       let personaId = profile.persona_memory_id;
       const existing = personaId ? this.load(ctx, personaId) : null;
       if (existing && existing.status === "active") {
-        const duplicate = this.duplicate(
-          ctx,
-          existing.space_id,
-          preset.persona.content,
+        const duplicate = this.duplicate(ctx, preset.persona.content,
           existing.id,
         );
         if (duplicate) {
@@ -489,7 +455,6 @@ export class Store {
           this.update(ctx, {
             request_id: randomUUID(),
             id: existing.id,
-            space_id: existing.space_id,
             expected_revision: existing.revision,
             patch: { ...preset.persona, type: "persona" },
             reason,
@@ -509,8 +474,7 @@ export class Store {
           this.restore(ctx, {
             request_id: randomUUID(),
             id: personaId,
-            space_id: memory.space_id,
-            expected_revision: memory.revision,
+                expected_revision: memory.revision,
             reason,
           });
       }
@@ -655,9 +619,6 @@ export class Store {
             "INSERT INTO subjects(id,label,created_at,kind) VALUES (?,?,?,?)",
           )
           .run(subjectId, label, Date.now(), newKind);
-        this.db
-          .prepare("INSERT INTO spaces VALUES (?,?,?)")
-          .run(randomUUID(), subjectId, "default");
       }
       const id = randomUUID(),
         secret = "vmcp_" + id + "." + randomBytes(32).toString("base64url"),
@@ -683,9 +644,6 @@ export class Store {
         revoked_at: null,
         secret_available: true,
         token: secret,
-        default_space_id: String(
-          this.spaces(subjectId).find((s) => s.name === "default")!.id,
-        ),
       };
       if (options.request_id) {
         const safe = { ...result, token: undefined, secret_available: false };
@@ -830,10 +788,6 @@ export class Store {
         revoked_at: null,
         secret_available: true,
         token: secret,
-        default_space_id: String(
-          this.spaces(String(t!.subject_id)).find((s) => s.name === "default")!
-            .id,
-        ),
       };
     });
   }
@@ -847,10 +801,8 @@ export class Store {
   }
   private memorySnapshot(ctx: Context, id: string) {
     const m = this.load(ctx, id);
-    const space = this.row("SELECT name FROM spaces WHERE id=?", m.space_id);
     return {
       schema_version: 1 as const,
-      space_name: space ? String(space.name) : "default",
       memory: m,
       versions: this.rows(
         "SELECT revision,data FROM versions WHERE memory_id=? ORDER BY revision",
@@ -1097,11 +1049,9 @@ export class Store {
         targetSubjectId,
       });
       const target = this.adminFor(targetSubjectId);
-      const spaces = this.spaces(targetSubjectId);
       const snapshots: {
         trashId: string;
         payload: {
-          space_name: string;
           memory: Memory;
           versions: { revision: number; data: Memory }[];
           links: MemoryLink[];
@@ -1113,20 +1063,13 @@ export class Store {
         if (!item || item.kind !== "memory") continue;
         const payload = item.payload as {
           schema_version: number;
-          space_name: string;
           memory: Memory;
           versions: { revision: number; data: Memory }[];
           links: MemoryLink[];
         };
-        const space =
-          spaces.find((s) => s.name === payload.space_name) ??
-          spaces.find((s) => s.name === "default") ??
-          spaces[0];
-        if (!space) throw new DomainError("RESTORE_BLOCKED", "No target space");
         const memory = {
           ...payload.memory,
           subject_id: targetSubjectId,
-          space_id: String(space.id),
           content_hash: hash(normalize(payload.memory.content)),
           revision: Math.max(1, Number(payload.memory.revision) || 1),
           // A merged pointer may refer to a memory outside the restored batch;
@@ -1147,8 +1090,7 @@ export class Store {
             JSON.stringify({
               ...v.data,
               subject_id: targetSubjectId,
-              space_id: String(space.id),
-            }),
+                }),
           );
         snapshots.push({ trashId: id, payload, memory });
         restored.push(memory.id);
@@ -1201,7 +1143,6 @@ export class Store {
       "SELECT id,label FROM subjects WHERE id=?",
       targetSubjectId,
     );
-    const spaces = targetSubject ? this.spaces(targetSubjectId) : [];
     const targetMemories = targetSubject ? this.all(targetSubjectId) : [];
     const targetIds = new Set(targetMemories.map((m) => m.id));
     const details = ids.map((id) => this.trashVault().get(id));
@@ -1252,7 +1193,6 @@ export class Store {
       } else {
         const payload = detail.payload as {
           schema_version?: number;
-          space_name?: string;
           memory?: Memory;
           links?: MemoryLink[];
         } | null;
@@ -1292,43 +1232,26 @@ export class Store {
               code: "ID_CONFLICT",
               message: "目标账户已存在同 ID 记忆",
             });
-          const exactSpace = spaces.find((s) => s.name === payload.space_name);
-          const space =
-            exactSpace ?? spaces.find((s) => s.name === "default") ?? spaces[0];
-          if (space && !exactSpace)
-            issues.push({
-              level: "orange",
-              code: "SPACE_REMAPPED",
-              message: `原空间「${payload.space_name ?? "未知"}」在目标账户不存在，将恢复到「${space.name}」`,
-            });
-          if (!space)
-            issues.push({
-              level: "red",
-              code: "SPACE_MISSING",
-              message: "目标账户没有可用空间",
-            });
-          else if (
+          if (
             this.row(
-              "SELECT id FROM memories WHERE subject_id=? AND space_id=? AND content_hash=?",
+              "SELECT id FROM memories WHERE subject_id=? AND content_hash=?",
               targetSubjectId,
-              String(space.id),
               hash(normalize(memory.content)),
             )
           )
             issues.push({
               level: "red",
               code: "DUPLICATE_CONTENT",
-              message: "目标账户同一空间已存在相同内容",
+              message: "目标账户已存在相同内容",
             });
-          if (space) {
-            const contentKey =
-              String(space.id) + "\u0000" + hash(normalize(memory.content));
+          {
+            const contentKey = hash(normalize(memory.content));
             const prior = batchContent.get(contentKey);
             if (prior && prior !== id)
               issues.push({
                 level: "red",
                 code: "BATCH_DUPLICATE_CONTENT",
-                message: "本批次有多条相同内容会进入同一目标空间，不能一起恢复",
+                message: "本批次包含多条相同内容，不能一起恢复",
               });
             else batchContent.set(contentKey, id);
           }
@@ -1346,7 +1269,6 @@ export class Store {
               (m) =>
                 m.id !== memory.id &&
                 m.status === "active" &&
-                m.space_id === (space ? String(space.id) : "") &&
                 m.profile?.profile_key === memory.profile?.profile_key,
             )
           )
@@ -1564,12 +1486,11 @@ export class Store {
     this.validateFields(m, m.subject_id);
     this.db
       .prepare(
-        "INSERT INTO memories VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET content_hash=excluded.content_hash,revision=excluded.revision,status=excluded.status,merged_into=excluded.merged_into,data=excluded.data",
+        "INSERT INTO memories VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET content_hash=excluded.content_hash,revision=excluded.revision,status=excluded.status,merged_into=excluded.merged_into,data=excluded.data",
       )
       .run(
         m.id,
         m.subject_id,
-        m.space_id,
         m.content_hash,
         m.revision,
         m.status,
@@ -1667,7 +1588,6 @@ export class Store {
     const other = this.all(m.subject_id).find(
       (x) =>
         x.id !== m.id &&
-        x.space_id === m.space_id &&
         x.status === "active" &&
         x.profile?.profile_key === m.profile!.profile_key &&
         (x.valid_until === null || x.valid_until > Date.now()),
@@ -1676,14 +1596,12 @@ export class Store {
   }
   private duplicate(
     ctx: Context,
-    space: string,
     content: string,
     exclude?: string,
   ) {
     const r = this.row(
-      "SELECT id,data FROM memories WHERE subject_id=? AND space_id=? AND content_hash=?",
+      "SELECT id,data FROM memories WHERE subject_id=? AND content_hash=?",
       ctx.subjectId,
-      space,
       hash(normalize(content)),
     );
     if (!r || r.id === exclude) return;
@@ -1742,9 +1660,7 @@ export class Store {
       }[];
     }>(ctx, "memory_add", input, () => {
       this.validateFields(input, ctx.subjectId);
-      const space = this.spaceIds(ctx, input.scope, input.space_id);
-      check(space.length === 1);
-      const duplicate = this.duplicate(ctx, space[0]!, input.content);
+      const duplicate = this.duplicate(ctx, input.content);
       if (duplicate) {
         if (input.source) {
           duplicate.sources = this.sources([
@@ -1767,7 +1683,7 @@ export class Store {
           ids: [duplicate.id],
         };
       }
-      const similar = this.similar(ctx, space[0]!, input.embedding);
+      const similar = this.similar(ctx, input.embedding);
       if (similar.length && !input.distinct_reason)
         return {
           data: {
@@ -1784,7 +1700,6 @@ export class Store {
       const m: Memory = {
         id: randomUUID(),
         subject_id: ctx.subjectId,
-        space_id: space[0]!,
         type: input.type,
         title: input.title ?? "",
         content: input.content,
@@ -1828,10 +1743,6 @@ export class Store {
   update(ctx: Context, input: UpdateInput) {
     return this.mutate(ctx, "memory_update", input, () => {
       const m = this.load(ctx, input.id);
-      check(
-        this.spaceIds(ctx, input.scope, input.space_id).includes(m.space_id),
-        "NOT_FOUND",
-      );
       check(m.revision === input.expected_revision, "REVISION_CONFLICT");
       check(!m.merged_into, "MERGED_MEMORY");
       this.text(input.reason, 1, 500);
@@ -1852,7 +1763,7 @@ export class Store {
       if (!ctx.admin && this.protected(m))
         check(this.protected(next), "PROTECTED_MEMORY");
       check(
-        !this.duplicate(ctx, m.space_id, next.content, m.id),
+        !this.duplicate(ctx, next.content, m.id),
         "DUPLICATE_CONTENT",
       );
       next.content_hash = hash(normalize(next.content));
@@ -1901,7 +1812,6 @@ export class Store {
         input.ids.length <= 5 &&
         new Set(input.ids).size === input.ids.length,
     );
-    const scope = this.spaceIds(ctx, input.scope);
     const budget = input.token_budget ?? this.getConfig().tokenBudget;
     check(Number.isInteger(budget) && budget >= 128 && budget <= 1200);
     const items: Memory[] = [];
@@ -1915,7 +1825,6 @@ export class Store {
       if (!r) continue;
       const m = this.load(ctx, id);
       if (
-        !scope.includes(m.space_id) ||
         (!input.include_archived && !this.effective(m))
       )
         continue;
@@ -1935,13 +1844,7 @@ export class Store {
     return this.mutate(ctx, "memory_link", input, () => {
       let source = this.load(ctx, input.source_id),
         target = this.load(ctx, input.target_id);
-      check(source.id !== target.id && source.space_id === target.space_id);
-      check(
-        this.spaceIds(ctx, input.scope, input.space_id).includes(
-          source.space_id,
-        ),
-        "NOT_FOUND",
-      );
+      check(source.id !== target.id);
       check(!source.merged_into && !target.merged_into, "MERGED_MEMORY");
       check(this.linkAllowed(ctx.subjectId, input.type));
       check(["upsert", "remove"].includes(input.action));
@@ -2014,10 +1917,8 @@ export class Store {
           input.items.length <= (ctx.admin ? 100 : 5) &&
           new Set(input.items.map((i) => i.id)).size === input.items.length,
       );
-      const scope = this.spaceIds(ctx, input.scope, input.space_id),
-        items = input.items.map((i) => {
+      const items = input.items.map((i) => {
           const m = this.load(ctx, i.id);
-          check(scope.includes(m.space_id), "NOT_FOUND");
           check(
             m.revision === i.revision && m.status === "active",
             "REVISION_CONFLICT",
@@ -2058,10 +1959,6 @@ export class Store {
   restore(ctx: Context, input: RestoreInput) {
     return this.mutate(ctx, "memory_restore", input, () => {
       const m = this.load(ctx, input.id);
-      check(
-        this.spaceIds(ctx, input.scope, input.space_id).includes(m.space_id),
-        "NOT_FOUND",
-      );
       check(m.revision === input.expected_revision, "REVISION_CONFLICT");
       check(!m.merged_into, "MERGED_MEMORY");
       check(m.status === "archived", "REVISION_CONFLICT");
@@ -2100,18 +1997,10 @@ export class Store {
       });
       const target = items[0]!,
         sources = items.slice(1);
-      check(items.every((m) => m.space_id === target.space_id));
-      check(
-        this.spaceIds(ctx, input.scope, input.space_id).includes(
-          target.space_id,
-        ),
-        "NOT_FOUND",
-      );
       this.text(input.reason, 1, 500);
       this.validateFields({ ...target, content: input.final_content });
       const duplicate = this.duplicate(
         ctx,
-        target.space_id,
         input.final_content,
         target.id,
       );
@@ -2212,7 +2101,6 @@ export class Store {
   }
   private similar(
     ctx: Context,
-    spaceId: string,
     embedding?: { model: string; vector: number[] },
   ) {
     if (!embedding) return [];
@@ -2224,7 +2112,6 @@ export class Store {
     const query = Buffer.from(new Float32Array(embedding.vector).buffer);
     const results: { id: string; content: string; similarity: number }[] = [];
     for (const m of this.all(ctx.subjectId)) {
-      if (m.space_id !== spaceId) continue;
       const v = this.row(
         "SELECT vector FROM vectors WHERE memory_id=? AND revision=? AND model=?",
         m.id,
@@ -2289,13 +2176,11 @@ export class Store {
       };
     });
   }
-  embeddingCandidates(ctx: Context, scope?: Scope) {
+  embeddingCandidates(ctx: Context) {
     this.authorize(ctx);
-    const spaces = this.spaceIds(ctx, scope);
     return this.all(ctx.subjectId)
       .filter(
         (m) =>
-          spaces.includes(m.space_id) &&
           m.status === "active" &&
           m.embedding_state !== "ready",
       )
@@ -2340,7 +2225,6 @@ export class Store {
           (input.keywords ?? []).map((k) => normalize(k).toLowerCase()),
         ),
       ],
-      spaces = this.spaceIds(ctx, input.scope, input.space_id),
       now = Date.now();
     const ftsIds = new Set<string>();
     if (terms.length) {
@@ -2356,7 +2240,6 @@ export class Store {
     }
     const candidates = this.all(ctx.subjectId).filter(
       (m) =>
-        spaces.includes(m.space_id) &&
         this.effective(m, now, config) &&
         (!input.types || input.types.includes(m.type)) &&
         (!!input.embedding ||
@@ -2542,7 +2425,6 @@ export class Store {
       (m) =>
         (!filters.status || m.status === filters.status) &&
         (!filters.type || m.type === filters.type) &&
-        (!filters.space_id || m.space_id === filters.space_id) &&
         (!filters.query ||
           normalize(m.title + " " + m.content + " " + m.keywords.join(" "))
             .toLowerCase()
@@ -2564,7 +2446,6 @@ export class Store {
   graph(
     subjectId: string,
     filters: {
-      space_id?: string;
       type?: string;
       focus_id?: string;
       node_limit?: number;
@@ -2589,7 +2470,6 @@ export class Store {
     const all = this.all(subjectId).filter(
         (m) =>
           this.effective(m) &&
-          (!filters.space_id || m.space_id === filters.space_id) &&
           (!filters.type || m.type === filters.type) &&
           (!filters.focus_id || focus.has(m.id)),
       ),
@@ -2829,7 +2709,7 @@ export class Store {
     const ids = new Set<string>();
     for (const m of payload.memories) {
       this.validateFields(m, subjectId);
-      check(uuid(m.id) && !ids.has(m.id) && uuid(m.space_id), "IMPORT_INVALID");
+      check(uuid(m.id) && !ids.has(m.id), "IMPORT_INVALID");
       ids.add(m.id);
       check(
         ["active", "archived"].includes(m.status) &&
@@ -2871,7 +2751,7 @@ export class Store {
       while (current.merged_into) {
         const next = byId.get(current.merged_into);
         check(
-          next && next.space_id === m.space_id && !visited.has(next.id),
+          next && !visited.has(next.id),
           "IMPORT_INVALID",
         );
         visited.add(next.id);
@@ -2901,8 +2781,6 @@ export class Store {
           edge.created_at >= 0 &&
           Number.isSafeInteger(edge.updated_at) &&
           edge.updated_at >= 0 &&
-          byId.get(edge.source_id)!.space_id ===
-            byId.get(edge.target_id)!.space_id,
         "IMPORT_INVALID",
       );
   }
@@ -2945,26 +2823,16 @@ export class Store {
         subjectId,
         checksum: payload.checksum,
       });
-      const spaceMap = new Map<string, string>(),
-        imported = new Set<string>();
+      const imported = new Set<string>();
       let skipped = 0;
       for (const m of payload.memories) {
         if (this.row("SELECT id FROM memories WHERE id=?", m.id)) {
           skipped++;
           continue;
         }
-        let space = spaceMap.get(m.space_id);
-        if (!space) {
-          space = randomUUID();
-          spaceMap.set(m.space_id, space);
-          this.db
-            .prepare("INSERT INTO spaces VALUES (?,?,?)")
-            .run(space, subjectId, "Imported " + space.slice(0, 8));
-        }
         const copy = {
           ...m,
           subject_id: subjectId,
-          space_id: space,
           merged_into: null,
           embedding_state: "pending" as const,
         };
@@ -2984,7 +2852,6 @@ export class Store {
         if (!imported.has(e.source_id) || !imported.has(e.target_id)) continue;
         const a = this.load(ctx, e.source_id),
           b = this.load(ctx, e.target_id);
-        check(a.space_id === b.space_id, "IMPORT_INVALID");
         let source = e.source_id,
           target = e.target_id;
         if (e.type === "related_to" && source > target)
@@ -3049,7 +2916,7 @@ export class Store {
   listBackups() {
     return this.rows("SELECT * FROM backups ORDER BY created_at DESC");
   }
-  async backup(path: string) {
+  async backup(path: string, label = "") {
     check(resolve(path) !== resolve(this.path));
     mkdirSync(dirname(resolve(path)), { recursive: true });
     check(
@@ -3076,11 +2943,18 @@ export class Store {
       path: resolve(path),
       sha256: hashFile(path),
       created_at: Date.now(),
+      label,
     };
     this.tx(() => {
       this.db
-        .prepare("INSERT INTO backups VALUES (?,?,?,?)")
-        .run(result.id, result.path, result.sha256, result.created_at);
+        .prepare("INSERT INTO backups VALUES (?,?,?,?,?)")
+        .run(
+          result.id,
+          result.path,
+          result.sha256,
+          result.created_at,
+          result.label,
+        );
       this.audit(
         { subjectId: "system", tokenId: "admin", admin: true },
         "backup.create",
@@ -3088,6 +2962,101 @@ export class Store {
       );
     });
     return result;
+  }
+  updateBackupLabel(id: string, label: string) {
+    check(
+      !!this.row("SELECT id FROM backups WHERE id=?", id),
+      "NOT_FOUND",
+      "备份不存在",
+    );
+    this.tx(() => {
+      this.db
+        .prepare("UPDATE backups SET label=? WHERE id=?")
+        .run(label.slice(0, 200), id);
+      this.audit(
+        { subjectId: "system", tokenId: "admin", admin: true },
+        "backup.relabel",
+        [id],
+      );
+    });
+    return this.row("SELECT * FROM backups WHERE id=?", id)!;
+  }
+  deleteBackup(id: string) {
+    const row = this.row("SELECT * FROM backups WHERE id=?", id);
+    check(!!row, "NOT_FOUND", "备份不存在");
+    this.tx(() => {
+      this.db.prepare("DELETE FROM backups WHERE id=?").run(id);
+      this.audit(
+        { subjectId: "system", tokenId: "admin", admin: true },
+        "backup.delete",
+        [id],
+      );
+    });
+    return row;
+  }
+  registerBackup(path: string, label = "") {
+    const absolute = resolve(path);
+    check(existsSync(absolute), "IMPORT_INVALID", "Backup file missing");
+    const result = {
+      id: randomUUID(),
+      path: absolute,
+      sha256: hashFile(absolute),
+      created_at: Date.now(),
+      label,
+    };
+    this.tx(() => {
+      this.db
+        .prepare("INSERT INTO backups VALUES (?,?,?,?,?)")
+        .run(
+          result.id,
+          result.path,
+          result.sha256,
+          result.created_at,
+          result.label,
+        );
+    });
+    return result;
+  }
+  inspectBackup(path: string) {
+    const absolute = resolve(path);
+    check(existsSync(absolute), "IMPORT_INVALID", "备份文件不存在");
+    const db = new Database(absolute, { readonly: true, fileMustExist: true });
+    try {
+      const integrity = db.pragma("integrity_check", { simple: true });
+      const violations = (db.pragma("foreign_key_check") as unknown[]).length;
+      const meta = (key: string) =>
+        (
+          db.prepare("SELECT value FROM metadata WHERE key=?").get(key) as
+            | { value?: string }
+            | undefined
+        )?.value ?? null;
+      const count = (table: string) =>
+        Number(
+          (db.prepare(`SELECT count(*) AS n FROM ${table}`).get() as {
+            n: number;
+          }).n,
+        );
+      return {
+        path: absolute,
+        schema_version: meta("schema_version"),
+        dataset_id: meta("dataset_id"),
+        integrity: integrity === "ok",
+        foreign_key_violations: violations,
+        size: statSync(absolute).size,
+        sha256: hashFile(absolute),
+        counts: {
+          accounts: count("subjects"),
+          memories: count("memories"),
+          links: count("links"),
+          tokens: count("tokens"),
+        },
+      };
+    } catch (error) {
+      check(false, "IMPORT_INVALID", "备份文件无法读取");
+      throw error;
+    } finally {
+      db.close();
+    }
   }
   restorePreview(path: string) {
     const registered = this.row(
@@ -3239,8 +3208,6 @@ export class Store {
           ...this.getConfig(),
           account_kind: this.accountKind(ctx.subjectId),
           capabilities: capabilities(this.accountKind(ctx.subjectId)),
-          spaces: this.spaces(ctx.subjectId),
-          default_space_id: this.spaceIds(ctx)[0],
         });
       default:
         throw new DomainError("VALIDATION_ERROR", "Unknown tool");

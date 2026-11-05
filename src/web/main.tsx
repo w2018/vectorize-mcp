@@ -234,10 +234,19 @@ function App() {
           ) : (
             <React.Fragment key={scoped ? page + subject : page}>
               {page === "memories" && (
-                <Memories subject={subject} refresh={refresh} />
+                <Memories
+                  subject={subject}
+                  accounts={accounts.data?.items || []}
+                  refresh={refresh}
+                />
               )}
               {page === "profiles" && (
-                <Memories subject={subject} refresh={refresh} profiles />
+                <Memories
+                  subject={subject}
+                  accounts={accounts.data?.items || []}
+                  refresh={refresh}
+                  profiles
+                />
               )}
               {page === "graph" && (
                 <GraphView subject={subject} refresh={refresh} kind={kind} />

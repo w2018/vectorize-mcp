@@ -65,7 +65,6 @@ export interface Profile {
 export interface Memory {
   id: string;
   subject_id: string;
-  space_id: string;
   title: string;
   content: string;
   type: MemoryType;
@@ -94,10 +93,6 @@ export interface Account {
   status?: string;
   active_token_id?: string | null;
   memory_count?: number;
-}
-export interface Space {
-  id: string;
-  name: string;
 }
 export interface Token {
   id: string;
@@ -168,7 +163,54 @@ export interface Backup {
   created_at: number;
   size: number;
   sha256: string;
+  label?: string;
+  path?: string;
+  kind?: string;
   verified_at?: number;
+}
+export interface WebdavPreset {
+  key: "jianguoyun" | "custom";
+  label: string;
+  url: string;
+}
+export interface WebdavStatus {
+  configured: boolean;
+  provider: "jianguoyun" | "custom";
+  url: string;
+  username: string;
+  root: string;
+  has_password: boolean;
+  presets: WebdavPreset[];
+}
+export interface CloudFile {
+  name: string;
+  size: number;
+  modified_at: string;
+  path: string;
+}
+export interface CloudJobLog {
+  at: number;
+  level: "info" | "warn" | "error";
+  text: string;
+}
+export interface CloudJob {
+  id: string;
+  status: "running" | "done" | "failed";
+  logs: CloudJobLog[];
+  result: {
+    backup_id: string;
+    backup_name: string;
+    path: string;
+    report: {
+      integrity: boolean;
+      schema_version: string | null;
+      foreign_key_violations: number;
+      counts: { accounts: number; memories: number; links: number; tokens: number };
+    };
+    preview: Preview;
+  } | null;
+  error: string | null;
+  started_at: number;
 }
 export interface Audit {
   id: string;

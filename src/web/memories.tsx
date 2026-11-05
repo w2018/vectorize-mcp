@@ -4,10 +4,10 @@ import {
   dataChanged,
   query,
   writeBody,
+  type Account,
   type Memory,
   type MemoryType,
   type Page,
-  type Space,
   type Preview,
 } from "./api";
 import {
@@ -23,21 +23,33 @@ import {
 } from "./ui";
 export function MemoryEditor({
   subject,
+  accounts,
   memory,
-  spaces,
   onClose,
   onSaved,
   profile = false,
 }: {
   subject: string;
+  accounts: Account[];
   memory?: Memory;
-  spaces: Space[];
   onClose: () => void;
   onSaved: () => void;
   profile?: boolean;
 }) {
   const [type, setType] = useState<MemoryType>(
     memory?.type || (profile ? "profile" : "fact"),
+  );
+  const [account, setAccount] = useState(subject);
+  const [peek, setPeek] = useState<Memory | null>(null);
+  const sameType = useResource<Page<Memory>>(
+    "/memories" +
+      query({
+        subject_id: account,
+        type,
+        status: "active",
+        limit: 20,
+      }),
+    0,
   );
   const action = useAction();
   async function submit(e: FormEvent<HTMLFormElement>) {
@@ -88,8 +100,7 @@ export function MemoryEditor({
                 reason: f.get("reason"),
               }
             : {
-                subject_id: subject,
-                space_id: f.get("space_id"),
+                subject_id: account,
                 ...patch,
                 source: { platform: "web" },
                 ...(f.get("distinct_reason")
@@ -116,8 +127,13 @@ export function MemoryEditor({
           .slice(0, 16)
       : "";
   return (
-    <Modal title={memory ? "修改记忆" : "记下一件重要的事"} onClose={onClose}>
-      <form onSubmit={submit}>
+    <Modal
+      title={memory ? "修改记忆" : "记下一件重要的事"}
+      onClose={onClose}
+      locked
+    >
+      <div className="editor-shell">
+      <form className="editor-form" onSubmit={submit}>
         <Feedback error={action.error} notice="" />
         <div className="form-grid">
           <label>
@@ -134,16 +150,20 @@ export function MemoryEditor({
             </select>
           </label>
           <label>
-            空间
+            写入到哪个账户
             <select
-              name="space_id"
-              required
+              value={account}
               disabled={!!memory}
-              defaultValue={memory?.space_id || spaces[0]?.id}
+              onChange={(e) => {
+                setAccount(e.target.value);
+                setPeek(null);
+              }}
             >
-              {spaces.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
+              {accounts.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name}
+                  {a.kind === "qqbot" ? " · QQBOT" : ""}
+                  {a.status === "unbound" ? " · 未绑定凭据" : ""}
                 </option>
               ))}
             </select>
@@ -282,29 +302,62 @@ export function MemoryEditor({
         )}
         <footer>
           <button type="button" disabled={action.busy} onClick={onClose}>
-            取消
+            关闭
           </button>
-          <button className="primary" disabled={action.busy || !spaces.length}>
+          <button className="primary" disabled={action.busy}>
             {action.busy ? "正在保存…" : "保存记忆"}
           </button>
         </footer>
       </form>
+      <aside className="editor-side" aria-label="同类型已有记忆">
+        <h3>这个账户已有的「{types[type]}」</h3>
+        <p className="hint">
+          先看看有没有重复，点击条目可查看完整内容。
+        </p>
+        <State
+          loading={sameType.loading}
+          error={sameType.error}
+          empty={!sameType.data?.items.length}
+        >
+          <ul className="editor-side-list">
+            {sameType.data?.items.map((m) => (
+              <li key={m.id}>
+                <button type="button" onClick={() => setPeek(m)}>
+                  {m.title || m.content.slice(0, 28)}
+                </button>
+                <small>{date(m.updated_at)}</small>
+              </li>
+            ))}
+          </ul>
+        </State>
+        {peek && (
+          <div className="editor-peek">
+            <strong>{peek.title || "无标题"}</strong>
+            <p>{peek.content}</p>
+            <button type="button" onClick={() => setPeek(null)}>
+              收起
+            </button>
+          </div>
+        )}
+      </aside>
+      </div>
     </Modal>
   );
 }
 export function Memories({
   subject,
+  accounts,
   refresh,
   profiles = false,
 }: {
   subject: string;
+  accounts: Account[];
   refresh: number;
   profiles?: boolean;
 }) {
   const [version, setVersion] = useState(0);
   const [search, setSearch] = useState("");
   const [type, setType] = useState("");
-  const [space, setSpace] = useState("");
   const [status, setStatus] = useState("active");
   const [cursor, setCursor] = useState("");
   const [editing, setEditing] = useState<Memory | null | undefined>();
@@ -322,17 +375,12 @@ export function Memories({
   const [reasonText, setReasonText] = useState("");
   const [restoreMemory, setRestoreMemory] = useState<Memory | null>(null);
   const action = useAction();
-  const spaces = useResource<Page<Space>>(
-    "/spaces" + query({ subject_id: subject }),
-    refresh,
-  );
   const records = useResource<Page<Memory>>(
     (profiles ? "/profiles" : "/memories") +
       query({
         subject_id: subject,
         q: search,
         type: profiles ? "profile" : type,
-        space_id: space,
         status,
         cursor,
         limit: 20,
@@ -388,7 +436,7 @@ export function Memories({
           ＋ {profiles ? "添加画像" : "新建记忆"}
         </button>
       </Heading>
-      <Feedback error={action.error || spaces.error} notice={action.notice} />
+      <Feedback error={action.error} notice={action.notice} />
       <section className="panel">
         <div className="filters">
           <label className="search">
@@ -403,21 +451,6 @@ export function Memories({
               }}
             />
           </label>
-          <select
-            aria-label="空间"
-            value={space}
-            onChange={(e) => {
-              setSpace(e.target.value);
-              setCursor("");
-            }}
-          >
-            <option value="">全部空间</option>
-            {spaces.data?.items.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
           {!profiles && (
             <select
               aria-label="类型"
@@ -516,9 +549,9 @@ export function Memories({
       {editing !== undefined && (
         <MemoryEditor
           subject={subject}
+          accounts={accounts}
           memory={editing || undefined}
           profile={profiles}
-          spaces={spaces.data?.items || []}
           onClose={() => setEditing(undefined)}
           onSaved={reload}
         />

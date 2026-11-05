@@ -11,7 +11,6 @@ import {
   type Memory,
   type Page,
   type Preview,
-  type Space,
 } from "./api";
 import {
   ConfirmDialog,
@@ -44,7 +43,6 @@ export function GraphView({
   kind?: AccountKind;
 }) {
   const [version, setVersion] = useState(0);
-  const [space, setSpace] = useState("");
   const [type, setType] = useState("");
   const [search, setSearch] = useState("");
   const [timePoint, setTimePoint] = useState<number | null>(null);
@@ -57,7 +55,6 @@ export function GraphView({
   const action = useAction();
   useEffect(() => {
     setVersion(0);
-    setSpace("");
     setType("");
     setSearch("");
     setTimePoint(null);
@@ -67,15 +64,10 @@ export function GraphView({
     setRemovingLink(null);
     setFallbackReason("");
   }, [subject, kind]);
-  const spaces = useResource<Page<Space>>(
-    "/spaces" + query({ subject_id: subject }),
-    refresh,
-  );
   const graph = useResource<Graph>(
     "/graph" +
       query({
         subject_id: subject,
-        space_id: space,
         type,
         node_limit: 500,
         edge_limit: 500,
@@ -150,7 +142,7 @@ export function GraphView({
           ＋ 添加关系
         </button>
       </Heading>
-      <Feedback error={action.error || spaces.error} notice={action.notice} />
+      <Feedback error={action.error} notice={action.notice} />
       {fallbackReason && !list && (
         <div className="notice warning">
           {fallbackReason} 已切换为文字列表，记忆管理不受影响。
@@ -220,21 +212,6 @@ export function GraphView({
                   )}
                 </div>
               )}
-              <label>
-                空间
-                <select
-                  aria-label="空间"
-                  value={space}
-                  onChange={(e) => setSpace(e.target.value)}
-                >
-                  <option value="">全部空间</option>
-                  {spaces.data?.items.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
               <label>
                 类型
                 <select

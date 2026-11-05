@@ -616,6 +616,86 @@ dialog header {
 dialog header h2 {
   margin: 0;
 }
+dialog:has(.editor-shell) {
+  width: min(1040px, calc(100% - 32px));
+}
+.editor-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 18px;
+  align-items: start;
+}
+.editor-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.editor-side {
+  border-left: 1px solid #e3ecdc;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.editor-side h3 {
+  margin: 0;
+  font-size: 14px;
+}
+.editor-side .hint {
+  margin: 0;
+  font-size: 12px;
+  color: #8c9d81;
+}
+.editor-side-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 340px;
+  overflow: auto;
+}
+.editor-side-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.editor-side-list button {
+  text-align: left;
+  border: 1px solid #e3ecdc;
+  border-radius: 8px;
+  background: #f8faf5;
+  padding: 6px 9px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.editor-side-list small {
+  font-size: 11px;
+  color: #8c9d81;
+}
+.editor-peek {
+  border: 1px solid #e3ecdc;
+  border-radius: 10px;
+  background: #f8faf5;
+  padding: 10px;
+  font-size: 13px;
+}
+.editor-peek p {
+  margin: 6px 0;
+  white-space: pre-wrap;
+}
+@media (max-width: 900px) {
+  .editor-shell {
+    grid-template-columns: 1fr;
+  }
+  .editor-side {
+    border-left: none;
+    border-top: 1px solid #e3ecdc;
+    padding-left: 0;
+    padding-top: 12px;
+  }
+}
 .icon-button {
   border: 0;
   background: transparent;
@@ -1163,6 +1243,8 @@ td button {
   grid-template-columns: 240px 1fr;
   gap: 14px;
   align-items: stretch;
+  /* 左右两栏等高：高度由容器决定，控制台与画布底边对齐。 */
+  height: clamp(560px, calc(100vh - 260px), 760px);
 }
 .graph-side {
   display: flex;
@@ -1208,7 +1290,10 @@ td button {
 }
 .graph-stage {
   position: relative;
-  min-height: 560px;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 14px;
 }
 .graph-detail {
   position: absolute;
@@ -1278,8 +1363,73 @@ td button {
 @media (max-width: 900px) {
   .graph-shell {
     grid-template-columns: 1fr;
+    height: auto;
   }
   .graph-stage {
-    min-height: 420px;
+    height: 420px;
+    min-height: 0;
   }
+}
+
+.row-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.section-head h3 {
+  margin: 0;
+}
+.card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+.form-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+.inline-form {
+  flex-basis: 100%;
+}
+.inline-form input {
+  flex: 1;
+  min-width: 0;
+}
+.job-log {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 300px;
+  overflow: auto;
+  font-size: 12.5px;
+}
+.job-log p {
+  margin: 0;
+}
+.log-info {
+  color: #4a6152;
+}
+.log-warn {
+  color: #967b36;
+}
+.log-error {
+  color: #b24a3c;
+}
+.plain-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: #5b6f60;
+  font-size: 13px;
+  line-height: 1.8;
 }

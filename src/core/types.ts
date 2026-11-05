@@ -61,9 +61,6 @@ export interface Context {
   admin?: boolean;
   authEpoch?: number;
 }
-export interface Scope {
-  space_ids?: string[];
-}
 export interface Source {
   platform?: string;
   agent?: string;
@@ -90,8 +87,6 @@ export interface MemoryFields {
 }
 export interface Request {
   request_id: string;
-  scope?: Scope;
-  space_id?: string;
 }
 export interface AddInput extends Request, MemoryFields {
   source?: Source;
@@ -149,7 +144,6 @@ export interface SearchInput extends Request {
   embedding?: Embedding;
 }
 export interface GetInput {
-  scope?: Scope;
   ids: string[];
   token_budget?: number;
   include_archived?: boolean;
@@ -178,7 +172,6 @@ export interface Config {
 export interface Memory extends Required<Omit<MemoryFields, "profile">> {
   id: string;
   subject_id: string;
-  space_id: string;
   content_hash: string;
   revision: number;
   retrieval_count: string;
@@ -234,7 +227,6 @@ export interface Envelope<T> {
 export interface MemoryFilters {
   status?: "active" | "archived";
   type?: MemoryType;
-  space_id?: string;
   query?: string;
   limit?: number;
   offset?: number;
@@ -253,7 +245,6 @@ export interface TokenResult extends TokenInfo {
   kind: AccountKind;
   token?: string;
   secret_available: boolean;
-  default_space_id: string;
 }
 export interface Preview {
   preview_token: string;
