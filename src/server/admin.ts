@@ -263,6 +263,12 @@ export async function registerAdmin(
   route("POST", "/tokens/:id/revoke", async (req) =>
     write("revokeToken", param(req), text(body(req).preview_token)),
   );
+  route("POST", "/tokens/:id/rotate-preview", async (req) =>
+    write("rotatePreview", param(req)),
+  );
+  route("POST", "/tokens/:id/rotate", async (req) =>
+    write("rotateToken", param(req), text(body(req).preview_token)),
+  );
   route("POST", "/accounts/:id/enable-preview", async (req) =>
     write("enablePreview", param(req)),
   );
@@ -535,15 +541,13 @@ export async function registerAdmin(
       limit = integer(q.limit, 50, 100);
     const rows = await read<RecordData[]>("operationLogs", limit + 1, start);
     return {
-      items: rows
-        .slice(0, limit)
-        .map((r) => ({
-          ...r,
-          actor_id: r.actor_id ?? r.actor,
-          result: "ok",
-          target_ids:
-            typeof r.target === "string" ? JSON.parse(r.target) : r.target,
-        })),
+      items: rows.slice(0, limit).map((r) => ({
+        ...r,
+        actor_id: r.actor_id ?? r.actor,
+        result: "ok",
+        target_ids:
+          typeof r.target === "string" ? JSON.parse(r.target) : r.target,
+      })),
       next_cursor: rows.length > limit ? cursor(start + limit) : null,
     };
   });

@@ -489,6 +489,70 @@ export class Store {
       return { revoked: true, subject_id: t!.subject_id };
     });
   }
+  rotatePreview(tokenId: string) {
+    const t = this.row(
+      "SELECT id,subject_id,label,revision,status FROM tokens WHERE id=?",
+      tokenId,
+    );
+    check(t, "NOT_FOUND");
+    check(t!.status === "active", "REVISION_CONFLICT");
+    return {
+      ...this.preview("admin", "rotate", {
+        tokenId,
+        revision: t!.revision,
+      }),
+      token: t,
+      stats: this.stats(String(t!.subject_id)),
+      message:
+        "旧 Token 将立即失效；随后签发一枚新 Token，并返回可直接复制的 MCP 配置。",
+    };
+  }
+  rotateToken(tokenId: string, previewToken: string): TokenResult {
+    return this.tx(() => {
+      const t = this.row("SELECT * FROM tokens WHERE id=?", tokenId);
+      check(t, "NOT_FOUND");
+      this.consume(previewToken, "admin", "rotate", {
+        tokenId,
+        revision: t!.revision,
+      });
+      check(t!.status === "active", "REVISION_CONFLICT");
+      const now = Date.now(),
+        id = randomUUID(),
+        secret = "vmcp_" + id + "." + randomBytes(32).toString("base64url");
+      this.db
+        .prepare(
+          "UPDATE tokens SET status=?,revision=revision+1,revoked_at=? WHERE id=?",
+        )
+        .run("revoked", now, tokenId);
+      this.db
+        .prepare("INSERT INTO tokens VALUES (?,?,?,?,?,?,?,?)")
+        .run(id, t!.subject_id, t!.label, hash(secret), "active", 1, now, null);
+      this.db
+        .prepare(
+          "UPDATE subjects SET access_state=?,auth_epoch=auth_epoch+1 WHERE id=?",
+        )
+        .run("bound", t!.subject_id);
+      this.audit(this.adminFor(String(t!.subject_id)), "token.rotate", [
+        tokenId,
+        id,
+      ]);
+      return {
+        id,
+        subject_id: String(t!.subject_id),
+        label: String(t!.label),
+        status: "active",
+        revision: 1,
+        created_at: now,
+        revoked_at: null,
+        secret_available: true,
+        token: secret,
+        default_space_id: String(
+          this.spaces(String(t!.subject_id)).find((s) => s.name === "default")!
+            .id,
+        ),
+      };
+    });
+  }
   private preview(actor: string, action: string, payload: unknown): Preview {
     return this.tx(() => {
       const token = randomBytes(32).toString("base64url"),

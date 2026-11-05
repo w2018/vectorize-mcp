@@ -105,7 +105,7 @@ export function createMcpHandler<C>(service: McpService<C>) {
     for (const name of Object.keys(toolSchemas) as ToolName[]) {
       const schema = toolSchemas[name];
       server.registerTool(
-        name,
+        "w_" + name,
         {
           description: toolDescriptions[name],
           inputSchema: schema,

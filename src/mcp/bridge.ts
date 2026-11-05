@@ -44,13 +44,15 @@ export async function callWithRetry<T>(
   if (!Number.isInteger(attempts) || attempts < 1 || attempts > 5)
     throw new Error("Retry attempts must be 1–5");
   // Validate before touching the network. Unknown tools are forwarded once only.
-  const known = Object.prototype.hasOwnProperty.call(toolSchemas, tool);
-  if (known) toolSchemas[tool as ToolName].parse(args);
+  // Public tool names carry the w_ prefix; schema keys stay unprefixed.
+  const internal = tool.startsWith("w_") ? tool.slice(2) : tool;
+  const known = Object.prototype.hasOwnProperty.call(toolSchemas, internal);
+  if (known) toolSchemas[internal as ToolName].parse(args);
   const snapshot = JSON.stringify(args);
   const safe =
     known &&
-    (tool === "memory_get" ||
-      tool === "memory_config_get" ||
+    (internal === "memory_get" ||
+      internal === "memory_config_get" ||
       typeof args.request_id === "string");
   for (let attempt = 0; ; attempt++) {
     try {
