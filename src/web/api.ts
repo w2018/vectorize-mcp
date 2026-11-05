@@ -309,9 +309,15 @@ async function request<T>(
       NOT_FOUND: "接口不存在，请刷新页面。",
       RATE_LIMITED: "尝试过于频繁，请一分钟后再试。",
       SERVER_BUSY: "服务器繁忙，请稍后重试。",
+      OVERLOADED: "服务繁忙，请稍后重试。",
+      DATABASE_UNAVAILABLE: "数据库暂时不可用，请稍后重试。",
+      BACKUP_INCOMPATIBLE: "备份的数据结构版本不兼容，请选择 v0.2.3 及之后生成的备份。",
+      SCHEMA_UNSUPPORTED: "数据结构版本不兼容。",
     };
     throw new ApiError(
-      result.error?.message || messages[result.error?.code ?? ""] || "操作未完成，请稍后重试。",
+      messages[result.error?.code ?? ""] ||
+        result.error?.message ||
+        "操作未完成，请稍后重试。",
       result.error?.code || "REQUEST_FAILED",
       response.status,
     );

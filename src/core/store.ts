@@ -3058,12 +3058,32 @@ export class Store {
       db.close();
     }
   }
+  /** Read a backup's schema_version without mutating anything. */
+  private backupSchemaVersion(path: string): string | null {
+    let probe: Database.Database | undefined;
+    try {
+      probe = new Database(resolve(path), { readonly: true, fileMustExist: true });
+      const row = probe
+        .prepare("SELECT value FROM metadata WHERE key=?")
+        .get("schema_version") as { value?: string } | undefined;
+      return row?.value ?? null;
+    } catch {
+      return null;
+    } finally {
+      probe?.close();
+    }
+  }
   restorePreview(path: string) {
     const registered = this.row(
       "SELECT * FROM backups WHERE path=?",
       resolve(path),
     );
     check(registered && registered.sha256 === hashFile(path), "IMPORT_INVALID");
+    check(
+      this.backupSchemaVersion(path) === "3",
+      "BACKUP_INCOMPATIBLE",
+      "备份的数据结构版本不兼容，请选择 v0.2.3 及之后生成的备份",
+    );
     return {
       ...this.preview("admin", "restore_backup", {
         path: resolve(path),
@@ -3092,6 +3112,16 @@ export class Store {
     check(hashFile(replacement) === digest, "IMPORT_INVALID");
     const candidate = this.open(replacement);
     try {
+      const version = (
+        candidate
+          .prepare("SELECT value FROM metadata WHERE key=?")
+          .get("schema_version") as { value?: string } | undefined
+      )?.value;
+      check(
+        version === "3",
+        "BACKUP_INCOMPATIBLE",
+        "备份的数据结构版本不兼容，请选择 v0.2.3 及之后生成的备份",
+      );
       check(
         candidate.pragma("integrity_check", { simple: true }) === "ok",
         "IMPORT_INVALID",
@@ -3117,6 +3147,14 @@ export class Store {
         .run(Math.max(currentMaxEpoch, restoredMax) + 1);
       candidate.exec("DELETE FROM previews;DELETE FROM dedup;");
       candidate.pragma("wal_checkpoint(TRUNCATE)");
+    } catch (error) {
+      // Never leave an incompatible/corrupt temp copy behind.
+      try {
+        if (existsSync(replacement)) rmSync(replacement);
+      } catch {
+        /* best-effort cleanup */
+      }
+      throw error;
     } finally {
       candidate.close();
     }

@@ -120,6 +120,12 @@ export class DatabasePool {
     return p;
   }
   read<T>(key: string, method: string, ...args: unknown[]): Promise<T> {
+    if (this.readers.length === 0)
+      return Promise.reject(
+        Object.assign(new Error("Database readers unavailable"), {
+          code: "DATABASE_UNAVAILABLE",
+        }),
+      );
     return this.track(() =>
       this.reads.run(key, () =>
         this.readers[this.cursor++ % this.readers.length]!.call<T>(
@@ -161,6 +167,10 @@ export class DatabasePool {
           await this.openReaders();
           this.maintenance = false;
         } catch (e) {
+          // The restore itself may have failed or the swapped database is
+          // unreadable. Clear maintenance so callers get a truthful error
+          // instead of every request reporting OVERLOADED forever.
+          this.maintenance = false;
           throw new AggregateError(
             failure ? [failure, e] : [e],
             "Database unavailable after restore",
