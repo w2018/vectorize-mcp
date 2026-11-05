@@ -211,6 +211,48 @@ export interface Preview {
   expires_at: number;
   [key: string]: unknown;
 }
+export type TrashKind = "memory" | "token";
+export interface TrashItemSummary {
+  id: string;
+  kind: TrashKind;
+  source_subject_id: string;
+  source_label: string;
+  target_id: string;
+  label: string;
+  deleted_at: number;
+  actor: string;
+  size_bytes: number;
+  state: "pending" | "committed";
+}
+export interface TrashItemDetail extends TrashItemSummary {
+  payload: unknown;
+  schema_version: number;
+}
+export type RestoreLevel = "green" | "orange" | "red";
+export interface RestoreIssue {
+  level: RestoreLevel;
+  code: string;
+  message: string;
+}
+export interface RestoreCheck {
+  trash_id: string;
+  target_id: string;
+  kind: TrashKind;
+  label: string;
+  level: RestoreLevel;
+  issues: RestoreIssue[];
+  summary?: string;
+}
+export interface TrashCompat {
+  preview_token: string;
+  expires_at: number;
+  target_subject_id: string;
+  target_label: string;
+  items: RestoreCheck[];
+  summary: { green: number; orange: number; red: number; total: number };
+  restorable: boolean;
+}
+
 export interface ExportPayload {
   schema_version: 1;
   dataset_id: string;

@@ -6,6 +6,8 @@ import { Memories } from "./memories";
 import { Accounts, Backups, Transfer, Settings, AuditLog } from "./management";
 import { GraphView, Stats, Suggestions } from "./insights";
 import "./style.css";
+import { Trash } from "./trash";
+import { About } from "./about";
 const navigation = [
   ["memories", "▤", "记忆"],
   ["profiles", "◉", "关于我"],
@@ -17,6 +19,7 @@ const navigation = [
   ["backups", "◷", "备份"],
   ["settings", "⚙", "设置"],
   ["audit", "≡", "操作记录"],
+  ["trash", "♲", "回收站"],
 ] as const;
 function App() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
@@ -58,6 +61,11 @@ function App() {
       setSubject(accounts.data.items[0]?.id || "");
   }, [accounts.data, subject]);
   const reload = () => setRefresh((v) => v + 1);
+  useEffect(() => {
+    const changed = () => setRefresh((v) => v + 1);
+    window.addEventListener("memory-data-changed", changed);
+    return () => window.removeEventListener("memory-data-changed", changed);
+  }, []);
   if (authenticated === null)
     return (
       <main className="login">
@@ -153,6 +161,12 @@ function App() {
         <div className="sidebar-foot">
           <span className="status-dot" />
           独立账户 · 安全管理<small>每一条记忆，都由你掌握。</small>
+          <button
+            aria-current={page === "about" ? "page" : undefined}
+            onClick={() => setPage("about")}
+          >
+            ⓘ 关于
+          </button>
         </div>
       </aside>
       <div className="main-wrap">
@@ -231,6 +245,8 @@ function App() {
               {page === "backups" && <Backups refresh={refresh} />}
               {page === "settings" && <Settings refresh={refresh} />}
               {page === "audit" && <AuditLog refresh={refresh} />}
+              {page === "trash" && <Trash refresh={refresh} />}
+              {page === "about" && <About />}
             </React.Fragment>
           )}
         </main>

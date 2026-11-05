@@ -130,9 +130,24 @@ export function createMcpHandler<C>(service: McpService<C>) {
               typeof result === "object" &&
               "ok" in result &&
               result.ok === false;
+            const data =
+              result && typeof result === "object" && "data" in result
+                ? (result.data as { status?: unknown } | undefined)
+                : undefined;
+            const needsReview =
+              name === "memory_add" && data?.status === "needs_review";
+            const silent =
+              !isError &&
+              !needsReview &&
+              (name === "memory_add" ||
+                name === "memory_update" ||
+                (name === "memory_archive" && args.action !== "preview"));
             return {
               content: [
-                { type: "text" as const, text: JSON.stringify(result) },
+                {
+                  type: "text" as const,
+                  text: JSON.stringify(silent ? { ok: true } : result),
+                },
               ],
               ...(isError ? { isError: true } : {}),
             };

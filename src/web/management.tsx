@@ -17,6 +17,7 @@ import {
   Feedback,
   Heading,
   PreviewDialog,
+  ConfirmDialog,
   State,
   useAction,
   useResource,
@@ -85,6 +86,7 @@ const AGENTS_MEMORY_RULES = `## 长期记忆（vectorize MCP）触发机制
 - 更新既有记忆用 \`w_memory_update\`，必须带当前 \`revision\`；同一逻辑变更生成新的 \`request_id\`，网络重试沿用原 ID 与参数。
 - 需要精确读取指定条目时调用 \`w_memory_get\`；整理关系用 \`w_memory_link\` / \`w_memory_merge\`；过期内容优先用 \`w_memory_archive\` 归档，不轻易永久删除。
 - 每个逻辑操作生成新的 UUID 作为 \`request_id\`；不要保存密码、Token、私钥等敏感信息；不要把猜测写成用户确认事实。
+- 记忆写入后不要向用户汇报或复述，不主动告知已保存、已更新或已归档；失败仍按实际情况处理。
 - 具体配置可用 \`w_memory_config_get\` 查看。`;
 type Pending = {
   title: string;
@@ -280,6 +282,29 @@ export function Accounts({
                       >
                         撤销…
                       </button>
+                      {t.status === "revoked" && (
+                        <button
+                          className="danger-outline"
+                          disabled={action.busy}
+                          onClick={() =>
+                            void action.run(async () => {
+                              const value = await api<Preview>(
+                                "/tokens/" + t.id + "/delete-preview",
+                                "POST",
+                                writeBody({}),
+                              );
+                              setPending({
+                                title: "删除已撤销凭据到回收站",
+                                value,
+                                path: "/tokens/" + t.id + "/delete",
+                                body: {},
+                              });
+                            }, "")
+                          }
+                        >
+                          删除…
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -476,32 +501,40 @@ export function Accounts({
         </State>
       </section>
       {pending && (
-        <PreviewDialog
+        <ConfirmDialog
           title={pending.title}
-          preview={pending.value}
-          busy={action.busy}
-          error={action.error}
           onClose={() => setPending(null)}
-          onConfirm={() =>
-            void action.run(async () => {
-              const body = {
+          onConfirm={async () => {
+            const result = await api<TokenResponse>(
+              pending.path,
+              "POST",
+              writeBody({
                 ...pending.body,
                 preview_token: pending.value.preview_token,
-              };
-              const result = await api<TokenResponse>(
-                pending.path,
-                "POST",
-                writeBody(body),
-              );
-              onChange();
-              if (pending.capture)
-                rememberIssued(result, pending.label ?? "凭据");
-              else if (pending.path === "/tokens")
-                rememberIssued(result, String(pending.body.label ?? "新凭据"));
-              setPending(null);
-            }, "操作已完成")
-          }
-        />
+              }),
+            );
+            onChange();
+            if (pending.capture)
+              rememberIssued(result, pending.label ?? "凭据");
+            else if (pending.path === "/tokens")
+              rememberIssued(result, String(pending.body.label ?? "新凭据"));
+          }}
+        >
+          <p>
+            删除仅适用于已撤销的凭据；快照移入回收站后无法恢复密钥，需要重新签发。
+          </p>
+          <pre>
+            {JSON.stringify(
+              Object.fromEntries(
+                Object.entries(pending.value).filter(
+                  ([k]) => k !== "preview_token",
+                ),
+              ),
+              null,
+              2,
+            )}
+          </pre>
+        </ConfirmDialog>
       )}
     </>
   );

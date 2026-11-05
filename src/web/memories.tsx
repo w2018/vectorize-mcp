@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import {
   api,
+  dataChanged,
   query,
   writeBody,
   type Memory,
@@ -14,7 +15,7 @@ import {
   Feedback,
   Heading,
   Modal,
-  PreviewDialog,
+  ConfirmDialog,
   State,
   types,
   useAction,
@@ -314,6 +315,12 @@ export function Memories({
     body: Record<string, unknown>;
     title: string;
   } | null>(null);
+  const [reasonRequest, setReasonRequest] = useState<{
+    memory: Memory;
+    kind: "archive" | "delete";
+  } | null>(null);
+  const [reasonText, setReasonText] = useState("");
+  const [restoreMemory, setRestoreMemory] = useState<Memory | null>(null);
   const action = useAction();
   const spaces = useResource<Page<Space>>(
     "/spaces" + query({ subject_id: subject }),
@@ -335,12 +342,17 @@ export function Memories({
   const reload = () => {
     setVersion((v) => v + 1);
     setDetail(null);
+    dataChanged();
   };
-  async function prepare(m: Memory, kind: "archive" | "purge") {
-    const reason = window.prompt(
-      kind === "archive" ? "归档原因（可恢复）" : "永久清除原因（不可恢复）",
-    );
-    if (!reason) return;
+  function prepare(m: Memory, kind: "archive" | "delete") {
+    setDetail(null);
+    setReasonText("");
+    setReasonRequest({ memory: m, kind });
+  }
+  async function previewReason() {
+    if (!reasonRequest || !reasonText.trim()) return;
+    const { memory: m, kind } = reasonRequest;
+    const reason = reasonText.trim();
     await action.run(async () => {
       const body = {
         subject_id: subject,
@@ -352,11 +364,12 @@ export function Memories({
         "POST",
         writeBody(body),
       );
+      setReasonRequest(null);
       setPreview({
         value,
         path: "/memories/" + kind,
         body,
-        title: kind === "archive" ? "确认归档记忆" : "永久清除记忆",
+        title: kind === "archive" ? "确认归档记忆" : "确认删除到回收站",
       });
     }, "");
   }
@@ -561,57 +574,117 @@ export function Memories({
               <button
                 disabled={action.busy || !!detail.merged_into}
                 onClick={() => {
-                  if (window.confirm("恢复这条记忆？原有效期不会延长。"))
-                    void action.run(async () => {
-                      await api(
-                        "/memories/restore",
-                        "POST",
-                        writeBody({
-                          subject_id: subject,
-                          id: detail.id,
-                          expected_revision: detail.revision,
-                          reason: "管理员恢复",
-                        }),
-                      );
-                      reload();
-                    }, "已恢复记忆");
+                  setRestoreMemory(detail);
+                  setDetail(null);
                 }}
               >
-                恢复
+                取消归档
               </button>
             )}
             <button
               className="danger-outline"
               disabled={action.busy}
-              onClick={() => void prepare(detail, "purge")}
+              onClick={() => void prepare(detail, "delete")}
             >
-              永久清除…
+              删除…
             </button>
           </footer>
         </Modal>
       )}
+      {reasonRequest && (
+        <Modal
+          title={reasonRequest.kind === "delete" ? "删除到回收站" : "归档记忆"}
+          onClose={() => {
+            if (!action.busy) setReasonRequest(null);
+          }}
+        >
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void previewReason();
+            }}
+          >
+            <Feedback error={action.error} notice="" />
+            <p>{reasonRequest.memory.title || reasonRequest.memory.content}</p>
+            <label>
+              操作原因
+              <input
+                autoFocus
+                required
+                value={reasonText}
+                onChange={(e) => setReasonText(e.target.value)}
+                placeholder="说明此次整理的原因"
+              />
+            </label>
+            <footer>
+              <button
+                type="button"
+                disabled={action.busy}
+                onClick={() => setReasonRequest(null)}
+              >
+                取消
+              </button>
+              <button
+                className="primary"
+                disabled={action.busy || !reasonText.trim()}
+              >
+                {action.busy ? "正在读取预览…" : "查看预览"}
+              </button>
+            </footer>
+          </form>
+        </Modal>
+      )}
+      {restoreMemory && (
+        <ConfirmDialog
+          title="取消归档"
+          onClose={() => setRestoreMemory(null)}
+          onConfirm={async () => {
+            await api(
+              "/memories/restore",
+              "POST",
+              writeBody({
+                subject_id: subject,
+                id: restoreMemory.id,
+                expected_revision: restoreMemory.revision,
+                reason: "管理员取消归档",
+              }),
+            );
+            reload();
+          }}
+        >
+          <p>原有效期不会延长。确认将这条记忆恢复到正在使用列表？</p>
+          <p>{restoreMemory.title || restoreMemory.content}</p>
+        </ConfirmDialog>
+      )}
       {preview && (
-        <PreviewDialog
+        <ConfirmDialog
           title={preview.title}
-          preview={preview.value}
-          busy={action.busy}
-          error={action.error}
           onClose={() => setPreview(null)}
-          onConfirm={() =>
-            void action.run(async () => {
-              await api(
-                preview.path,
-                "POST",
-                writeBody({
-                  ...preview.body,
-                  preview_token: preview.value.preview_token,
-                }),
-              );
-              setPreview(null);
-              reload();
-            })
-          }
-        />
+          onConfirm={async () => {
+            await api(
+              preview.path,
+              "POST",
+              writeBody({
+                ...preview.body,
+                preview_token: preview.value.preview_token,
+              }),
+            );
+            reload();
+          }}
+        >
+          <p>删除会移入回收站；归档可在记忆列表取消。请核对服务器预览。</p>
+          <pre>
+            {JSON.stringify(
+              Object.fromEntries(
+                Object.entries(preview.value).filter(
+                  ([k]) => k !== "preview_token",
+                ),
+              ),
+              null,
+              2,
+            )}
+          </pre>
+        </ConfirmDialog>
       )}
     </>
   );

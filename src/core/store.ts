@@ -16,6 +16,7 @@ import {
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { schema } from "./schema.js";
+import { TrashVault } from "./trash.js";
 import { hashFile } from "./file-hash.js";
 import { DomainError } from "./types.js";
 import type {
@@ -44,6 +45,12 @@ import type {
   Scope,
   ExportPayload,
   MemoryLink,
+  TrashItemSummary,
+  TrashKind,
+  TrashCompat,
+  RestoreCheck,
+  RestoreIssue,
+  RestoreLevel,
 } from "./types.js";
 export * from "./types.js";
 type Row = Record<string, unknown>;
@@ -110,10 +117,11 @@ export function weight(
 export class Store {
   private db: Database.Database;
   private logs?: Database.Database;
+  private trash?: TrashVault;
   private readonlyMode: boolean;
   constructor(
     public readonly path: string,
-    options: { readonly?: boolean; logPath?: string } = {},
+    options: { readonly?: boolean; logPath?: string; trashPath?: string } = {},
   ) {
     this.readonlyMode = !!options.readonly;
     if (path !== ":memory:" && !options.readonly)
@@ -152,6 +160,21 @@ export class Store {
       this.logs.exec(
         "CREATE TABLE IF NOT EXISTS observations(id TEXT PRIMARY KEY,event TEXT,payload TEXT,created_at INTEGER)",
       );
+      this.trash = new TrashVault(
+        options.trashPath ??
+          (path === ":memory:" ? ":memory:" : path + ".trash.sqlite"),
+      );
+      this.trash.reconcile((kind, targetId) =>
+        kind === "memory"
+          ? !!this.row("SELECT id FROM memories WHERE id=?", targetId)
+          : !!this.row("SELECT id FROM tokens WHERE id=?", targetId),
+      );
+    } else {
+      const tp =
+        options.trashPath ??
+        (path === ":memory:" ? ":memory:" : path + ".trash.sqlite");
+      if (tp === ":memory:" || existsSync(tp))
+        this.trash = new TrashVault(tp, true);
     }
   }
   private open(path: string, readonly = false) {
@@ -553,6 +576,604 @@ export class Store {
       };
     });
   }
+  private trashVault(): TrashVault {
+    check(this.trash, "DATABASE_UNAVAILABLE");
+    return this.trash!;
+  }
+  private subjectLabel(subjectId: string) {
+    const s = this.row("SELECT label FROM subjects WHERE id=?", subjectId);
+    return s ? String(s.label) : subjectId;
+  }
+  private memorySnapshot(ctx: Context, id: string) {
+    const m = this.load(ctx, id);
+    const space = this.row("SELECT name FROM spaces WHERE id=?", m.space_id);
+    return {
+      schema_version: 1 as const,
+      space_name: space ? String(space.name) : "default",
+      memory: m,
+      versions: this.rows(
+        "SELECT revision,data FROM versions WHERE memory_id=? ORDER BY revision",
+        id,
+      ).map((r) => ({
+        revision: Number(r.revision),
+        data: JSON.parse(String(r.data)) as Memory,
+      })),
+      links: this.rows(
+        "SELECT * FROM links WHERE source_id=? OR target_id=?",
+        id,
+        id,
+      ) as unknown as MemoryLink[],
+    };
+  }
+  private tokenSnapshot(id: string) {
+    const t = this.row("SELECT * FROM tokens WHERE id=?", id);
+    check(t, "NOT_FOUND");
+    return {
+      schema_version: 1 as const,
+      subject_label: this.subjectLabel(String(t!.subject_id)),
+      token: t,
+    };
+  }
+  listTrash(filters: { kind?: string; offset?: number; limit?: number } = {}) {
+    check(!filters.kind || ["memory", "token"].includes(filters.kind));
+    return this.trashVault().list(filters);
+  }
+  trashItem(id: string) {
+    const item = this.trashVault().get(id);
+    check(item, "NOT_FOUND");
+    if (item.kind === "token") {
+      const payload = item.payload as {
+        token?: Record<string, unknown>;
+      } | null;
+      if (payload?.token) {
+        const { digest: _digest, ...safe } = payload.token;
+        return { ...item, payload: { ...payload, token: safe } };
+      }
+    }
+    return item!;
+  }
+  deletePreview(
+    subjectId: string,
+    items: { id: string; revision: number }[],
+    reason: string,
+  ) {
+    const ctx = this.adminFor(subjectId);
+    this.checkDeleteMemories(ctx, items, reason);
+    return {
+      ...this.preview("admin", "memory_delete", { subjectId, items, reason }),
+      items: items.map((i) => {
+        const m = this.load(ctx, i.id);
+        return {
+          id: m.id,
+          revision: m.revision,
+          title: m.title,
+          summary: m.content.slice(0, 100),
+          status: m.status,
+        };
+      }),
+      stats: this.stats(subjectId),
+    };
+  }
+  private checkDeleteMemories(
+    ctx: Context,
+    items: { id: string; revision: number }[],
+    reason: string,
+  ) {
+    this.text(reason, 1, 500);
+    check(
+      items.length >= 1 &&
+        items.length <= 100 &&
+        new Set(items.map((i) => i.id)).size === items.length,
+    );
+    for (const i of items) {
+      const m = this.load(ctx, i.id);
+      check(m.revision === i.revision, "REVISION_CONFLICT");
+      check(m.status === "active" || m.status === "archived", "REVISION_CONFLICT");
+    }
+  }
+  deleteToTrash(
+    subjectId: string,
+    input: {
+      items: { id: string; revision: number }[];
+      reason: string;
+      preview_token: string;
+    },
+  ) {
+    const ctx = this.adminFor(subjectId);
+    this.checkDeleteMemories(ctx, input.items, input.reason);
+    const inserted: string[] = [];
+    let committed = false;
+    try {
+      const result = this.tx(() => {
+        this.consume(input.preview_token, "admin", "memory_delete", {
+          subjectId,
+          items: input.items,
+          reason: input.reason,
+        });
+        const snapshots = input.items.map((i) => ({
+          item: i,
+          payload: this.memorySnapshot(ctx, i.id),
+          trashId: randomUUID(),
+        }));
+        for (const snapshot of snapshots) {
+          inserted.push(snapshot.trashId);
+          this.trashVault().insert({
+            id: snapshot.trashId,
+            kind: "memory",
+            source_subject_id: subjectId,
+            source_label: this.subjectLabel(subjectId),
+            target_id: snapshot.item.id,
+            label:
+              snapshot.payload.memory.title ||
+              snapshot.payload.memory.content.slice(0, 40),
+            payload: snapshot.payload,
+            schema_version: 1,
+            deleted_at: Date.now(),
+            actor: "admin",
+          });
+        }
+        for (const snapshot of snapshots) {
+          const id = snapshot.item.id;
+          for (const dependent of this.rows(
+            "SELECT id,data FROM memories WHERE merged_into=?",
+            id,
+          ) as { id: string; data: string }[]) {
+            const record = JSON.parse(String(dependent.data)) as Memory;
+            record.merged_into = null;
+            record.revision = Number(record.revision) + 1;
+            record.updated_at = Date.now();
+            this.save(record);
+          }
+          for (const table of ["versions", "vectors", "query_terms"])
+            this.db
+              .prepare("DELETE FROM " + table + " WHERE memory_id=?")
+              .run(id);
+          this.db
+            .prepare("DELETE FROM links WHERE source_id=? OR target_id=?")
+            .run(id, id);
+          this.db.prepare("DELETE FROM memory_fts WHERE id=?").run(id);
+          this.db.prepare("DELETE FROM memories WHERE id=?").run(id);
+        }
+        this.audit(
+          ctx,
+          "memory.delete",
+          input.items.map((i) => i.id),
+        );
+        return {
+          deleted_ids: input.items.map((i) => i.id),
+          trash_ids: snapshots.map((s) => s.trashId),
+        };
+      });
+      committed = true;
+      // The main transaction is already durable. A failed bookkeeping update must
+      // leave the snapshot pending for startup reconciliation, never delete it.
+      for (const id of result.trash_ids) {
+        try {
+          this.trashVault().markCommitted(id);
+        } catch {
+          /* reconciled on next startup */
+        }
+      }
+      return result;
+    } catch (error) {
+      if (!committed) for (const id of inserted) this.trashVault().remove(id);
+      throw error;
+    }
+  }
+  deleteRevokedTokenPreview(tokenId: string) {
+    const t = this.row(
+      "SELECT id,subject_id,label,revision,status,created_at,revoked_at FROM tokens WHERE id=?",
+      tokenId,
+    );
+    check(t, "NOT_FOUND");
+    check(t!.status === "revoked", "REVISION_CONFLICT");
+    return {
+      ...this.preview("admin", "token_delete", { tokenId }),
+      token: t,
+      subject_label: this.subjectLabel(String(t!.subject_id)),
+    };
+  }
+  deleteRevokedToken(tokenId: string, previewToken: string) {
+    const t = this.row("SELECT * FROM tokens WHERE id=?", tokenId);
+    check(t, "NOT_FOUND");
+    check(t!.status === "revoked", "REVISION_CONFLICT");
+    const payload = this.tokenSnapshot(tokenId);
+    const trashId = randomUUID();
+    this.trashVault().insert({
+      id: trashId,
+      kind: "token",
+      source_subject_id: String(t!.subject_id),
+      source_label: payload.subject_label,
+      target_id: tokenId,
+      label: String(t!.label),
+      payload,
+      schema_version: 1,
+      deleted_at: Date.now(),
+      actor: "admin",
+    });
+    let committed = false;
+    try {
+      this.tx(() => {
+        this.consume(previewToken, "admin", "token_delete", { tokenId });
+        check(t!.status === "revoked", "REVISION_CONFLICT");
+        this.db.prepare("DELETE FROM tokens WHERE id=?").run(tokenId);
+        this.audit(this.adminFor(String(t!.subject_id)), "token.delete", [
+          tokenId,
+        ]);
+      });
+      committed = true;
+    } catch (error) {
+      if (!committed) this.trashVault().remove(trashId);
+      throw error;
+    }
+    try {
+      this.trashVault().markCommitted(trashId);
+    } catch {
+      /* reconciled on next startup */
+    }
+    return { deleted: true as const, trash_id: trashId };
+  }
+  restoreTrashCompat(ids: string[], targetSubjectId: string): TrashCompat {
+    const checked = this.checkTrash(ids, targetSubjectId);
+    const preview = this.preview("admin", "trash_restore", {
+      ids,
+      targetSubjectId,
+    });
+    return { ...preview, ...checked };
+  }
+  restoreTrash(
+    ids: string[],
+    targetSubjectId: string,
+    previewToken: string,
+  ) {
+    const checked = this.checkTrash(ids, targetSubjectId);
+    check(checked.restorable, "RESTORE_BLOCKED");
+    const warnings: string[] = [];
+    const restored: string[] = [];
+    const done: string[] = [];
+    this.tx(() => {
+      this.consume(previewToken, "admin", "trash_restore", {
+        ids,
+        targetSubjectId,
+      });
+      const target = this.adminFor(targetSubjectId);
+      const spaces = this.spaces(targetSubjectId);
+      const snapshots: {
+        trashId: string;
+        payload: {
+          space_name: string;
+          memory: Memory;
+          versions: { revision: number; data: Memory }[];
+          links: MemoryLink[];
+        };
+        memory: Memory;
+      }[] = [];
+      for (const id of ids) {
+        const item = this.trashVault().get(id);
+        if (!item || item.kind !== "memory") continue;
+        const payload = item.payload as {
+          schema_version: number;
+          space_name: string;
+          memory: Memory;
+          versions: { revision: number; data: Memory }[];
+          links: MemoryLink[];
+        };
+        const space =
+          spaces.find((s) => s.name === payload.space_name) ??
+          spaces.find((s) => s.name === "default") ??
+          spaces[0];
+        if (!space) throw new DomainError("RESTORE_BLOCKED", "No target space");
+        const memory = {
+          ...payload.memory,
+          subject_id: targetSubjectId,
+          space_id: String(space.id),
+          content_hash: hash(normalize(payload.memory.content)),
+          revision: Math.max(1, Number(payload.memory.revision) || 1),
+          // A merged pointer may refer to a memory outside the restored batch;
+          // restore as an independent memory instead of violating the foreign key.
+          merged_into: null,
+          embedding_state: "pending" as const,
+          weight: 0,
+        };
+        check(
+          !this.row("SELECT id FROM memories WHERE id=?", memory.id),
+          "RESTORE_BLOCKED",
+        );
+        this.save(memory, false);
+        for (const v of payload.versions ?? [])
+          this.db
+            .prepare("INSERT OR REPLACE INTO versions VALUES (?,?,?)")
+            .run(
+              memory.id,
+              Number(v.revision),
+              JSON.stringify({
+                ...v.data,
+                subject_id: targetSubjectId,
+                space_id: String(space.id),
+              }),
+            );
+        snapshots.push({ trashId: id, payload, memory });
+        restored.push(memory.id);
+        done.push(id);
+      }
+      const known = new Set(this.all(targetSubjectId).map((m) => m.id));
+      for (const snap of snapshots) {
+        for (const link of snap.payload.links ?? []) {
+          if (!known.has(link.source_id) || !known.has(link.target_id)) {
+            warnings.push("部分关联因目标记忆缺失未恢复");
+            continue;
+          }
+          this.db
+            .prepare("INSERT OR IGNORE INTO links VALUES (?,?,?,?,?,?,?,?,?)")
+            .run(
+              randomUUID(),
+              targetSubjectId,
+              link.source_id,
+              link.target_id,
+              link.type,
+              link.strength,
+              1,
+              Date.now(),
+              Date.now(),
+            );
+        }
+      }
+      this.audit(target, "trash.restore", done);
+    });
+    for (const id of done) {
+      try {
+        this.trashVault().remove(id);
+      } catch {
+        // The main database transaction is committed; leave the snapshot for
+        // startup reconciliation rather than reporting a failed restore.
+        warnings.push("恢复已完成，但回收站快照清理将在下次服务启动时完成");
+      }
+    }
+    return { restored, warnings: [...new Set(warnings)] };
+  }
+  private checkTrash(ids: string[], targetSubjectId: string) {
+    this.text(targetSubjectId, 1, 80);
+    check(
+      Array.isArray(ids) &&
+        ids.length >= 1 &&
+        ids.length <= 200 &&
+        new Set(ids).size === ids.length,
+    );
+    const targetSubject = this.row("SELECT id,label FROM subjects WHERE id=?", targetSubjectId);
+    const spaces = targetSubject ? this.spaces(targetSubjectId) : [];
+    const targetMemories = targetSubject ? this.all(targetSubjectId) : [];
+    const targetIds = new Set(targetMemories.map((m) => m.id));
+    const details = ids.map((id) => this.trashVault().get(id));
+    const batchIds = new Set(
+      details
+        .filter((d) => d && d.kind === "memory")
+        .map((d) => String((d!.payload as { memory?: { id?: string } }).memory?.id)),
+    );
+    const batchMemoryIds = new Map<string, string>();
+    const batchContent = new Map<string, string>();
+    const items: RestoreCheck[] = details.map((detail, index) => {
+      const id = ids[index]!;
+      if (!detail)
+        return {
+          trash_id: id,
+          target_id: "",
+          kind: "memory",
+          label: id,
+          level: "red",
+          issues: [{ level: "red", code: "NOT_FOUND", message: "回收站记录不存在" }],
+        };
+      if (!targetSubject)
+        return {
+          trash_id: id,
+          target_id: detail.target_id,
+          kind: detail.kind,
+          label: detail.label,
+          level: "red",
+          issues: [{ level: "red", code: "TARGET_NOT_FOUND", message: "目标账户不存在" }],
+        };
+      const issues: RestoreIssue[] = [];
+      if (detail.kind === "token") {
+        issues.push({
+          level: "red",
+          code: "TOKEN_NOT_RESTORABLE",
+          message: "访问凭据密钥不可逆，出于安全不能恢复，请在目标账户重新签发",
+        });
+      } else {
+        const payload = detail.payload as {
+          schema_version?: number;
+          space_name?: string;
+          memory?: Memory;
+          links?: MemoryLink[];
+        } | null;
+        if (!payload || payload.schema_version !== 1 || !payload.memory) {
+          issues.push({
+            level: "red",
+            code: "PAYLOAD_INVALID",
+            message: "快照结构损坏或版本不兼容",
+          });
+        } else {
+          const memory = payload.memory;
+          if (batchMemoryIds.has(memory.id))
+            issues.push({
+              level: "red",
+              code: "BATCH_ID_DUPLICATE",
+              message: "同一批次包含同一记忆的多个快照，不能一起恢复",
+            });
+          else batchMemoryIds.set(memory.id, id);
+          try {
+            this.validateFields(memory);
+          } catch {
+            issues.push({
+              level: "red",
+              code: "FIELDS_INVALID",
+              message: "快照字段不符合当前数据校验规则",
+            });
+          }
+          if (!["active", "archived"].includes(memory.status))
+            issues.push({
+              level: "red",
+              code: "STATUS_INVALID",
+              message: "快照状态无法恢复",
+            });
+          if (this.row("SELECT id FROM memories WHERE id=?", memory.id))
+            issues.push({
+              level: "red",
+              code: "ID_CONFLICT",
+              message: "目标账户已存在同 ID 记忆",
+            });
+          const exactSpace = spaces.find((s) => s.name === payload.space_name);
+          const space =
+            exactSpace ??
+            spaces.find((s) => s.name === "default") ??
+            spaces[0];
+          if (space && !exactSpace)
+            issues.push({
+              level: "orange",
+              code: "SPACE_REMAPPED",
+              message: `原空间「${payload.space_name ?? "未知"}」在目标账户不存在，将恢复到「${space.name}」`,
+            });
+          if (!space)
+            issues.push({
+              level: "red",
+              code: "SPACE_MISSING",
+              message: "目标账户没有可用空间",
+            });
+          else if (
+            this.row(
+              "SELECT id FROM memories WHERE subject_id=? AND space_id=? AND content_hash=?",
+              targetSubjectId,
+              String(space.id),
+              hash(normalize(memory.content)),
+            )
+          )
+            issues.push({
+              level: "red",
+              code: "DUPLICATE_CONTENT",
+              message: "目标账户同一空间已存在相同内容",
+            });
+          if (space) {
+            const contentKey =
+              String(space.id) + "\u0000" + hash(normalize(memory.content));
+            const prior = batchContent.get(contentKey);
+            if (prior && prior !== id)
+              issues.push({
+                level: "red",
+                code: "BATCH_DUPLICATE_CONTENT",
+                message: "本批次有多条相同内容会进入同一目标空间，不能一起恢复",
+              });
+            else batchContent.set(contentKey, id);
+          }
+          if (memory.merged_into)
+            issues.push({
+              level: "orange",
+              code: "MERGED_REFERENCE_DROPPED",
+              message: "原合并关系将被清除，恢复后成为独立记忆",
+            });
+          if (
+            memory.type === "profile" &&
+            memory.status === "active" &&
+            memory.profile &&
+            targetMemories.some(
+              (m) =>
+                m.id !== memory.id &&
+                m.status === "active" &&
+                m.space_id === (space ? String(space.id) : "") &&
+                m.profile?.profile_key === memory.profile?.profile_key,
+            )
+          )
+            issues.push({
+              level: "orange",
+              code: "PROFILE_CONFLICT",
+              message: "目标账户已有同键画像，恢复后可能出现重复画像",
+            });
+          if (memory.valid_until !== null && memory.valid_until <= Date.now())
+            issues.push({
+              level: "orange",
+              code: "EXPIRED",
+              message: "该记忆已过期，恢复后默认检索不可见",
+            });
+          const externalLink = (payload.links ?? []).some(
+            (l) =>
+              (!targetIds.has(l.source_id) && !batchIds.has(l.source_id)) ||
+              (!targetIds.has(l.target_id) && !batchIds.has(l.target_id)),
+          );
+          if (externalLink)
+            issues.push({
+              level: "orange",
+              code: "LINKS_DROPPED",
+              message: "部分关联指向未恢复或已不存在的记忆，将不再保留",
+            });
+        }
+      }
+      const level: RestoreLevel = issues.some((i) => i.level === "red")
+        ? "red"
+        : issues.some((i) => i.level === "orange")
+          ? "orange"
+          : "green";
+      const memory = (detail.payload as { memory?: Memory } | null)?.memory;
+      return {
+        trash_id: id,
+        target_id: detail.target_id,
+        kind: detail.kind,
+        label: detail.label,
+        level,
+        issues:
+          issues.length || level !== "green"
+            ? issues
+            : [{ level: "green", code: "OK", message: "兼容性检查通过，可安全恢复" }],
+        summary: memory
+          ? memory.content.slice(0, 120)
+          : detail.kind === "token"
+            ? "访问凭据快照"
+            : undefined,
+      };
+    });
+    const summary = {
+      green: items.filter((i) => i.level === "green").length,
+      orange: items.filter((i) => i.level === "orange").length,
+      red: items.filter((i) => i.level === "red").length,
+      total: items.length,
+    };
+    return {
+      target_subject_id: targetSubjectId,
+      target_label: targetSubject ? String(targetSubject.label) : "",
+      items,
+      summary,
+      restorable: summary.red === 0,
+    };
+  }
+  deleteTrash(ids: string[]) {
+    check(
+      Array.isArray(ids) &&
+        ids.length >= 1 &&
+        ids.length <= 200 &&
+        new Set(ids).size === ids.length,
+    );
+    return this.trashVault().delete(ids);
+  }
+  statsByAccount(days = 30) {
+    check(Number.isInteger(days) && days >= 1 && days <= 3650);
+    const subjects = this.rows("SELECT id,label FROM subjects ORDER BY created_at DESC");
+    return {
+      items: subjects.map((s) => {
+        const stats = this.stats(String(s.id), days);
+        return {
+          subject_id: String(s.id),
+          label: String(s.label),
+          memory_total: stats.memory_total,
+          memory_total_tokens: stats.memory_total_tokens,
+          search_requests: stats.search_requests,
+          extraction_total_tokens: stats.extraction_total_tokens,
+          hit_effective_rate: stats.hit_effective_rate,
+          active: stats.active,
+          archived: stats.archived,
+          merged: stats.merged,
+          total: stats.total,
+        };
+      }),
+    };
+  }
+
   private preview(actor: string, action: string, payload: unknown): Preview {
     return this.tx(() => {
       const token = randomBytes(32).toString("base64url"),
@@ -1730,6 +2351,24 @@ export class Store {
       archived: items.filter((m) => m.status === "archived").length,
       merged: items.filter((m) => m.merged_into).length,
       total: items.length,
+      memory_total: items.length,
+      memory_total_tokens: items.reduce(
+        (sum, m) => sum + Buffer.byteLength(JSON.stringify(this.compact(m))),
+        0,
+      ),
+      extraction_total_tokens: observations.reduce(
+        (sum, r) =>
+          sum +
+          r.data.items.reduce(
+            (bytes, item) => bytes + Buffer.byteLength(JSON.stringify(item)),
+            0,
+          ),
+        0,
+      ),
+      hit_effective_rate: observations.length
+        ? observations.filter((r) => r.data.items.length > 0).length /
+          observations.length
+        : null,
       retrieval_count: String(
         items
           .filter((m) => !m.merged_into)
@@ -2319,6 +2958,7 @@ export class Store {
   close() {
     this.db.close();
     this.logs?.close();
+    this.trash?.close();
   }
   purgePreview(
     subjectId: string,

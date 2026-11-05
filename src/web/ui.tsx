@@ -106,28 +106,157 @@ export function PreviewDialog({
   const details = Object.fromEntries(
     Object.entries(preview).filter(([key]) => key !== "preview_token"),
   );
+  const [cancelled, setCancelled] = useState(false);
   return (
     <Modal
       title={title}
       onClose={() => {
-        if (!busy) onClose();
+        if (!busy) setCancelled(true);
       }}
     >
-      {error && (
-        <div className="notice error" role="alert">
-          {error}
+      {cancelled ? (
+        <div className="notice" role="status">
+          操作已取消，未执行任何更改。
         </div>
+      ) : (
+        <>
+          {error && (
+            <div className="notice error" role="alert">
+              {error}
+            </div>
+          )}
+          <p>请核对本次操作的影响。预览过期或数据发生变化时，需要重新预览。</p>
+          <pre className="preview">{JSON.stringify(details, null, 2)}</pre>
+        </>
       )}
-      <p>请核对本次操作的影响。预览过期或数据发生变化时，需要重新预览。</p>
-      <pre className="preview">{JSON.stringify(details, null, 2)}</pre>
       <footer>
-        <button disabled={busy} onClick={onClose}>
-          取消
-        </button>
-        <button className="danger" disabled={busy} onClick={onConfirm}>
-          {busy ? "正在执行…" : "确认执行"}
-        </button>
+        {cancelled ? (
+          <button className="primary" onClick={onClose}>
+            关闭
+          </button>
+        ) : (
+          <>
+            <button disabled={busy} onClick={() => setCancelled(true)}>
+              取消
+            </button>
+            <button className="danger" disabled={busy} onClick={onConfirm}>
+              {busy ? "正在执行…" : "确认执行"}
+            </button>
+          </>
+        )}
       </footer>
+    </Modal>
+  );
+}
+export function LevelBadge({ level }: { level: "green" | "orange" | "red" }) {
+  return (
+    <span className={"level-badge level-" + level}>
+      {
+        {
+          green: "兼容 · 可恢复",
+          orange: "注意 · 有风险",
+          red: "不兼容 · 禁止恢复",
+        }[level]
+      }
+    </span>
+  );
+}
+export function ConfirmDialog({
+  title,
+  children,
+  onConfirm,
+  onClose,
+  disabled = false,
+  confirmLabel = "确认执行",
+}: {
+  title: string;
+  children?: ReactNode;
+  onConfirm: () => Promise<unknown>;
+  onClose: () => void;
+  disabled?: boolean;
+  confirmLabel?: string;
+}) {
+  const [state, setState] = useState<
+    "confirm" | "busy" | "success" | "error" | "cancelled"
+  >("confirm");
+  const [error, setError] = useState("");
+  const lock = useRef(false);
+  function cancel() {
+    if (!lock.current) setState("cancelled");
+  }
+  async function execute() {
+    if (lock.current) return;
+    lock.current = true;
+    setState("busy");
+    setError("");
+    try {
+      await onConfirm();
+      setState("success");
+    } catch (e) {
+      setError(errorText(e));
+      setState("error");
+    } finally {
+      lock.current = false;
+    }
+  }
+  return (
+    <Modal
+      title={title}
+      onClose={() => {
+        if (lock.current) return;
+        if (state === "success") onClose();
+        else cancel();
+      }}
+    >
+      <div data-confirm-state={state}>
+        {state === "success" ? (
+          <div className="notice success" role="status">
+            操作已成功完成。
+          </div>
+        ) : state === "cancelled" ? (
+          <div className="notice" role="status">
+            操作已取消，未执行任何更改。
+          </div>
+        ) : (
+          <>
+            {children}
+            {state === "error" && (
+              <div className="notice error" role="alert">
+                {error}
+              </div>
+            )}
+            {state === "busy" && <p role="status">正在确认并执行，请稍候…</p>}
+          </>
+        )}
+        <footer>
+          {state === "success" ? (
+            <button className="primary" onClick={onClose}>
+              完成
+            </button>
+          ) : state === "cancelled" ? (
+            <button className="primary" onClick={onClose}>
+              关闭
+            </button>
+          ) : (
+            <>
+              <button disabled={state === "busy"} onClick={cancel}>
+                取消
+              </button>
+              <button
+                className="danger"
+                disabled={disabled || state === "busy"}
+                onClick={() => void execute()}
+              >
+                {state === "busy"
+                  ? "确认中…"
+                  : state === "error"
+                    ? "重试"
+                    : confirmLabel}
+              </button>
+            </>
+          )}
+        </footer>
+      </div>
     </Modal>
   );
 }

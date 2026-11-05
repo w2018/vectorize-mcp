@@ -162,6 +162,11 @@ export async function registerAdmin(
     }
     return value;
   };
+  const trashIds = (value: unknown): string[] => {
+    if (!Array.isArray(value) || value.length < 1 || value.length > 200)
+      throw new DomainError("VALIDATION_ERROR");
+    return value.map(text);
+  };
   const route = (
     method: HTTPMethods,
     path: string,
@@ -235,6 +240,61 @@ export async function registerAdmin(
       next_cursor: start + limit < items.length ? cursor(start + limit) : null,
     };
   };
+  route("GET", "/trash", async (req) => {
+    const q = query(req);
+    const start = offset(q.cursor);
+    const limit = integer(q.limit, 20, 100);
+    const kind = q.kind === undefined || q.kind === "" ? undefined : text(q.kind);
+    if (kind !== undefined && kind !== "memory" && kind !== "token")
+      throw new DomainError("VALIDATION_ERROR");
+    const page = await read<{ items: unknown[]; total: number }>("listTrash", {
+      kind,
+      offset: start,
+      limit,
+    });
+    return {
+      ...page,
+      next_cursor: start + limit < page.total ? cursor(start + limit) : null,
+    };
+  });
+  route("GET", "/trash/:id", async (req) => read("trashItem", param(req)));
+  route("POST", "/trash/restore-compat", async (req) => {
+    const b = body(req);
+    return write("restoreTrashCompat", trashIds(b.ids), text(b.target_subject_id));
+  });
+  route("POST", "/trash/restore", async (req) => {
+    const b = body(req);
+    return write(
+      "restoreTrash",
+      trashIds(b.ids),
+      text(b.target_subject_id),
+      text(b.preview_token),
+    );
+  });
+  route("POST", "/trash/delete", async (req) =>
+    write("deleteTrash", trashIds(body(req).ids)),
+  );
+  route("POST", "/memories/delete-preview", async (req) => {
+    const b = body(req);
+    return write("deletePreview", subject(b), versionRefs(b.items), text(b.reason));
+  });
+  route("POST", "/memories/delete", async (req) => {
+    const b = body(req);
+    return write("deleteToTrash", subject(b), {
+      items: versionRefs(b.items),
+      reason: text(b.reason),
+      preview_token: text(b.preview_token),
+    });
+  });
+  route("POST", "/tokens/:id/delete-preview", async (req) =>
+    write("deleteRevokedTokenPreview", param(req)),
+  );
+  route("POST", "/tokens/:id/delete", async (req) =>
+    write("deleteRevokedToken", param(req), text(body(req).preview_token)),
+  );
+  route("GET", "/stats/accounts", async (req) =>
+    read("statsByAccount", integer(query(req).days, 30, 3650)),
+  );
   route("GET", "/accounts", async (req) =>
     paged(
       (await read<RecordData[]>("listAccounts")).map((a) => ({

@@ -1,3 +1,52 @@
+.star-map-3d {
+  touch-action: none;
+  cursor: grab;
+  background: radial-gradient(ellipse at center, #f9fcf9, #e8f1eb);
+}
+.star-map-3d:active {
+  cursor: grabbing;
+}
+.level-badge {
+  display: inline-block;
+  border-radius: 20px;
+  padding: 3px 10px;
+  font-size: 12px;
+}
+.level-green {
+  background: #e5f5e9;
+  color: #23653c;
+}
+.level-orange {
+  background: #fff1d8;
+  color: #8e590d;
+}
+.level-red {
+  background: #fee5e1;
+  color: #9e3025;
+}
+.compat-item {
+  border-bottom: 1px solid #e1e8df;
+  padding: 14px 0;
+}
+.sidebar-foot button {
+  margin-top: 14px;
+  width: 100%;
+}
+@media (max-width: 720px) {
+  .sidebar .sidebar-foot {
+    display: block;
+    padding: 0 0 10px;
+    margin: 0;
+  }
+  .sidebar-foot > small,
+  .sidebar-foot > .status-dot {
+    display: none;
+  }
+  .sidebar-foot button {
+    margin: 0;
+    width: auto;
+  }
+}
 :root {
   font-family: Inter, "Segoe UI", "Microsoft YaHei", sans-serif;
   color: #253d35;

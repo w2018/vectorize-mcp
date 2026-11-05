@@ -1,9 +1,11 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
+import { Graph3D } from "./graph3d";
 import {
   api,
   query,
   writeBody,
   type Graph,
+  type AccountStats,
   type Link,
   type Memory,
   type Page,
@@ -30,51 +32,6 @@ const colors: Record<string, string> = {
   lesson: "#a39744",
   task: "#689a8b",
 };
-function layout(nodes: Memory[], edges: Link[]) {
-  const positions = new Map(
-    nodes.map((n, i) => [
-      n.id,
-      {
-        x: 420 + Math.cos(i * 2.399963) * Math.sqrt(i + 1) * 19,
-        y: 270 + Math.sin(i * 2.399963) * Math.sqrt(i + 1) * 14,
-      },
-    ]),
-  );
-  for (let round = 0; round < 80; round++) {
-    const forces = new Map(nodes.map((n) => [n.id, { x: 0, y: 0 }]));
-    for (let i = 0; i < nodes.length; i++)
-      for (let j = i + 1; j < nodes.length; j++) {
-        const a = positions.get(nodes[i]!.id)!;
-        const b = positions.get(nodes[j]!.id)!;
-        const dx = a.x - b.x,
-          dy = a.y - b.y,
-          d = Math.max(dx * dx + dy * dy, 16),
-          f = 700 / d;
-        forces.get(nodes[i]!.id)!.x += dx * f;
-        forces.get(nodes[i]!.id)!.y += dy * f;
-        forces.get(nodes[j]!.id)!.x -= dx * f;
-        forces.get(nodes[j]!.id)!.y -= dy * f;
-      }
-    for (const e of edges) {
-      const a = positions.get(e.source_id),
-        b = positions.get(e.target_id);
-      if (!a || !b) continue;
-      const dx = b.x - a.x,
-        dy = b.y - a.y;
-      forces.get(e.source_id)!.x += dx * 0.008;
-      forces.get(e.source_id)!.y += dy * 0.008;
-      forces.get(e.target_id)!.x -= dx * 0.008;
-      forces.get(e.target_id)!.y -= dy * 0.008;
-    }
-    for (const n of nodes) {
-      const p = positions.get(n.id)!,
-        f = forces.get(n.id)!;
-      p.x = Math.max(35, Math.min(805, p.x + f.x + (420 - p.x) * 0.004));
-      p.y = Math.max(35, Math.min(505, p.y + f.y + (270 - p.y) * 0.004));
-    }
-  }
-  return positions;
-}
 export function GraphView({
   subject,
   refresh,
@@ -109,7 +66,6 @@ export function GraphView({
   );
   const nodes = graph.data?.nodes || [];
   const edges = graph.data?.edges || [];
-  const positions = useMemo(() => layout(nodes, edges), [graph.data]);
   return (
     <>
       <Heading
@@ -181,79 +137,17 @@ export function GraphView({
               ))}
             </div>
           ) : (
-            <svg
-              className="star-map"
-              viewBox="0 0 840 540"
-              role="img"
-              aria-label="记忆关系星图，可切换文字列表"
-            >
-              <defs>
-                <pattern
-                  id="dots"
-                  width="24"
-                  height="24"
-                  patternUnits="userSpaceOnUse"
-                >
-                  <circle cx="12" cy="12" r="1" fill="#e0e9e6" />
-                </pattern>
-              </defs>
-              <rect width="840" height="540" fill="url(#dots)" />
-              {edges.map((e) => {
-                const a = positions.get(e.source_id),
-                  b = positions.get(e.target_id);
-                return a && b ? (
-                  <line
-                    key={e.id}
-                    x1={a.x}
-                    y1={a.y}
-                    x2={b.x}
-                    y2={b.y}
-                    stroke="#aac4bc"
-                    strokeWidth={1 + e.strength * 2}
-                  />
-                ) : null;
-              })}
-              {nodes.map((n) => {
-                const p = positions.get(n.id)!;
-                return (
-                  <g
-                    key={n.id}
-                    role="button"
-                    tabIndex={0}
-                    aria-label={n.title || n.content}
-                    onClick={() => setSelected(n)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        setSelected(n);
-                      }
-                    }}
-                  >
-                    <circle
-                      cx={p.x}
-                      cy={p.y}
-                      r={7 + Math.max(0, Math.min(1, n.weight || 0)) * 13}
-                      fill={colors[n.type]}
-                      stroke="white"
-                      strokeWidth={3}
-                    />
-                    <title>{n.title || n.content}</title>
-                    {nodes.length < 45 && (
-                      <text
-                        x={p.x}
-                        y={p.y + 31}
-                        textAnchor="middle"
-                        fontSize={11}
-                        fill="#43574e"
-                      >
-                        {(n.title || n.content).slice(0, 12)}
-                      </text>
-                    )}
-                  </g>
-                );
-              })}
-            </svg>
+            <Graph3D
+              nodes={nodes}
+              edges={edges}
+              colors={colors}
+              onSelect={setSelected}
+            />
           )}
+          <p className="graph-help">
+            拖拽旋转 · 滚轮缩放 · 悬停高亮 ·
+            点击查看；键盘方向键旋转、空格暂停。系统减少动态效果时停止自动旋转。
+          </p>
           <div className="legend">
             {Object.entries(types).map(([k, v]) => (
               <span key={k}>
@@ -482,6 +376,10 @@ export function GraphView({
   );
 }
 interface Statistics {
+  memory_total: number;
+  memory_total_tokens: number;
+  extraction_total_tokens: number;
+  hit_effective_rate: number | null;
   active: number;
   archived: number;
   merged: number;
@@ -505,8 +403,21 @@ export function Stats({
     "/stats" + query({ subject_id: subject, days }),
     refresh,
   );
+  const accountStats = useResource<Page<AccountStats>>(
+    "/stats/accounts" + query({ days }),
+    refresh,
+  );
   const d = data.data;
   const metrics = [
+    ["记忆总条数", d?.memory_total],
+    ["记忆内容 token", d?.memory_total_tokens],
+    ["提取内容 token", d?.extraction_total_tokens],
+    [
+      "有效命中率",
+      d?.hit_effective_rate == null
+        ? "—"
+        : (d.hit_effective_rate * 100).toFixed(1) + "%",
+    ],
     ["正在使用", d?.active],
     ["已归档", d?.archived],
     ["已被合并", d?.merged],
@@ -541,6 +452,49 @@ export function Stats({
           <option value="90">最近 90 天</option>
         </select>
       </Heading>
+      <section className="panel padded">
+        <h2>按账户统计</h2>
+        <State
+          loading={accountStats.loading}
+          error={accountStats.error}
+          empty={!accountStats.data?.items.length}
+        >
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>账户</th>
+                  <th>记忆总数</th>
+                  <th>内容 token</th>
+                  <th>检索请求</th>
+                  <th>提取 token</th>
+                  <th>有效命中率</th>
+                  <th>活跃 / 归档 / 合并</th>
+                </tr>
+              </thead>
+              <tbody>
+                {accountStats.data?.items.map((a) => (
+                  <tr key={a.subject_id}>
+                    <td>{a.label}</td>
+                    <td>{a.memory_total}</td>
+                    <td>{a.memory_total_tokens}</td>
+                    <td>{a.search_requests}</td>
+                    <td>{a.extraction_total_tokens}</td>
+                    <td>
+                      {a.hit_effective_rate == null
+                        ? "—"
+                        : (a.hit_effective_rate * 100).toFixed(1) + "%"}
+                    </td>
+                    <td>
+                      {a.active} / {a.archived} / {a.merged}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </State>
+      </section>
       <State loading={data.loading} error={data.error}>
         <div className="metric-grid">
           {metrics.map(([label, value]) => (
@@ -552,6 +506,11 @@ export function Stats({
         </div>
         <section className="panel padded">
           <h2>如何理解这些数字</h2>
+          <p>
+            记忆内容 token 为服务端估算内容量；提取内容 token
+            为所选时间范围内实际返回内容的累计估算，不代表计费
+            token。没有检索请求时有效命中率显示为“—”。
+          </p>
           <p>
             被找到次数仅统计最终交给助手的记忆，不包含候选项、管理浏览和重复请求，次数不代表独立会话数。
           </p>

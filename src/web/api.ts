@@ -1,3 +1,59 @@
+export type RestoreLevel = "green" | "orange" | "red";
+export interface TrashItemSummary {
+  id: string;
+  kind: "memory" | "token";
+  source_subject_id: string;
+  source_label: string;
+  target_id: string;
+  label: string;
+  deleted_at: number;
+  actor: string;
+  size_bytes: number;
+  state: "pending" | "committed";
+}
+export interface TrashItemDetail extends TrashItemSummary {
+  payload: unknown;
+  schema_version: number;
+}
+export interface RestoreIssue {
+  level: RestoreLevel;
+  code: string;
+  message: string;
+}
+export interface RestoreCheck {
+  trash_id: string;
+  target_id: string;
+  kind: string;
+  label: string;
+  level: RestoreLevel;
+  issues: RestoreIssue[];
+  summary?: string;
+}
+export interface TrashCompat {
+  preview_token: string;
+  expires_at: number;
+  target_subject_id: string;
+  target_label: string;
+  items: RestoreCheck[];
+  summary: { green: number; orange: number; red: number; total: number };
+  restorable: boolean;
+}
+export interface AccountStats {
+  subject_id: string;
+  label: string;
+  memory_total: number;
+  memory_total_tokens: number;
+  search_requests: number;
+  extraction_total_tokens: number;
+  hit_effective_rate: number | null;
+  active: number;
+  archived: number;
+  merged: number;
+  total: number;
+}
+export function dataChanged() {
+  window.dispatchEvent(new Event("memory-data-changed"));
+}
 export type MemoryType =
   | "fact"
   | "preference"
