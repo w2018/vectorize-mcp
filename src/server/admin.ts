@@ -100,6 +100,26 @@ export async function registerAdmin(
   const imports = new Map<string, StagedImport>();
   let stagedBytes = 0;
   const origin = new URL(options.origin).origin;
+  const loopback = (host: string) =>
+    ["127.0.0.1", "localhost", "[::1]", "::1"].includes(host.toLowerCase());
+  // 浏览器用 localhost / [::1] / 不同端口访问本机服务时，Origin 与 PUBLIC_ORIGIN 不同，
+  // 但请求 Host 与 Origin 主机一致即视为同源，避免误判为跨站请求。
+  const originAllowed = (
+    header: string | undefined,
+    host: string | undefined,
+  ) => {
+    if (header === undefined || header === origin) return header !== undefined;
+    let parsed: URL;
+    try {
+      parsed = new URL(header);
+    } catch {
+      return false;
+    }
+    if (parsed.origin === origin) return true;
+    if (!loopback(parsed.hostname)) return false;
+    if (!host) return true;
+    return parsed.host.toLowerCase() === host.toLowerCase();
+  };
   const dropImport = (key: string) => {
     const entry = imports.get(key);
     if (entry) {
@@ -187,7 +207,13 @@ export async function registerAdmin(
         )
           throw new DomainError("UNAUTHENTICATED");
         if (method !== "GET" && method !== "HEAD") {
-          if (req.headers.origin !== origin) throw new DomainError("FORBIDDEN");
+          if (!originAllowed(req.headers.origin, req.headers.host)) {
+            app.log.warn(
+              { origin: req.headers.origin, host: req.headers.host, expected: origin },
+              "rejected cross-origin write",
+            );
+            throw new DomainError("FORBIDDEN");
+          }
           const token = req.headers["x-csrf-token"];
           if (
             !s ||
