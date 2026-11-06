@@ -50,11 +50,16 @@ export function About() {
   const [busy, setBusy] = useState(false);
   const timer = useRef<number | null>(null);
 
-  const runCheck = useCallback(async () => {
+  const runCheck = useCallback(async (force = false) => {
     setChecking(true);
     setCheckError("");
     try {
-      setCheck(await api<UpdateCheck>("/update/check", "GET"));
+      setCheck(
+        await api<UpdateCheck>(
+          force ? "/update/check?refresh=1" : "/update/check",
+          "GET",
+        ),
+      );
     } catch (e) {
       setCheckError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -63,7 +68,7 @@ export function About() {
   }, []);
 
   useEffect(() => {
-    void runCheck();
+    void runCheck(true);
     return () => {
       if (timer.current) window.clearTimeout(timer.current);
     };
@@ -159,7 +164,7 @@ export function About() {
           <dt>作者</dt>
           <dd>w2018</dd>
           <dt>版本</dt>
-          <dd>{check?.current ?? "0.3.6"}</dd>
+          <dd>{check?.current ?? "0.3.7"}</dd>
           <dt>开源协议</dt>
           <dd>MIT</dd>
           <dt>开源地址</dt>
@@ -217,7 +222,7 @@ export function About() {
           </details>
         )}
         <footer>
-          <button disabled={checking} onClick={() => void runCheck()}>
+          <button disabled={checking} onClick={() => void runCheck(true)}>
             {checking ? "检测中…" : "重新检测"}
           </button>
           {check?.has_update && (

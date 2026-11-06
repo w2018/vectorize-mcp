@@ -1157,8 +1157,8 @@ export async function registerAdmin(
     return 0;
   };
   let latestCache: { at: number; data: RecordData } | null = null;
-  const fetchLatestRelease = async () => {
-    if (latestCache && Date.now() - latestCache.at < 600000)
+  const fetchLatestRelease = async (force = false) => {
+    if (!force && latestCache && Date.now() - latestCache.at < 600000)
       return latestCache.data;
     const res = await fetch(
       "https://api.github.com/repos/" + GITHUB_REPO + "/releases/latest",
@@ -1285,12 +1285,12 @@ export async function registerAdmin(
     jobs.set(job.id, job);
     return job;
   };
-  route("GET", "/update/check", async () => {
+  route("GET", "/update/check", async (req) => {
     const current = await currentVersion();
     let latest = null;
     let error = null;
     try {
-      latest = await fetchLatestRelease();
+      latest = await fetchLatestRelease(query(req).refresh === "1");
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
