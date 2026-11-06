@@ -130,6 +130,14 @@ export function GraphView({
         : [],
     [edges, visible],
   );
+  const visibleLinks = useMemo(
+    () => visibleEdges.filter((e) => e.kind !== "similarity"),
+    [visibleEdges],
+  );
+  const visibleSimilar = useMemo(
+    () => visibleEdges.filter((e) => e.kind === "similarity"),
+    [visibleEdges],
+  );
   const typeOptions = MEMORY_CATALOG.filter((item) =>
     item.kinds.includes(kind),
   );
@@ -299,10 +307,10 @@ export function GraphView({
                     {visible.retrieval_count} 次 · {date(visible.created_at)}
                   </small>
                   <h3>关系链</h3>
-                  {visibleEdges.length === 0 && (
-                    <small>当前时间点没有可见关系。</small>
+                  {visibleLinks.length === 0 && (
+                    <small>当前时间点没有手动关系链。</small>
                   )}
-                  {visibleEdges.map((e) => {
+                  {visibleLinks.map((e) => {
                     const outgoing = e.source_id === visible.id;
                     const other = nodes.find(
                       (n) =>
@@ -362,6 +370,38 @@ export function GraphView({
                       </div>
                     );
                   })}
+                  {visibleSimilar.length > 0 && (
+                    <>
+                      <h3>相似记忆</h3>
+                      {visibleSimilar.map((e) => {
+                        const other = nodes.find(
+                          (n) =>
+                            n.id ===
+                            (e.source_id === visible.id
+                              ? e.target_id
+                              : e.source_id),
+                        );
+                        return (
+                          <div className="relation-chain" key={e.id}>
+                            <div className="relation-path">
+                              <span className="relation-node current">
+                                {nodeName(visible)}
+                              </span>
+                              <span className="relation-arrow">
+                                ≈ {Math.round((e.similarity || e.strength) * 100)}%
+                              </span>
+                              <button
+                                className="text-button relation-node"
+                                onClick={() => other && setSelected(other)}
+                              >
+                                {nodeName(other)}
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </>
+                  )}
                 </aside>
               )}
             </div>
@@ -555,6 +595,10 @@ interface Statistics {
   memory_total_tokens: number;
   extraction_total_tokens: number;
   hit_effective_rate: number | null;
+  result_rate?: number | null;
+  labeled_search_requests?: number;
+  labeled_hit_at_1?: number | null;
+  labeled_hit_at_3?: number | null;
   active: number;
   archived: number;
   merged: number;
@@ -589,37 +633,59 @@ export function Stats({
   const [rebuildResult, setRebuildResult] = useState<string>("");
   const d = data.data;
   const embeddingMissing = config.data && !config.data.embeddingModel;
-  const metrics = [
-    ["记忆总条数", d?.memory_total],
-    ["记忆内容 token", d?.memory_total_tokens],
-    ["提取内容 token", d?.extraction_total_tokens],
-    [
-      "有效命中率",
-      d?.hit_effective_rate == null
-        ? "—"
-        : (d.hit_effective_rate * 100).toFixed(1) + "%",
-    ],
-    ["正在使用", d?.active],
-    ["已归档", d?.archived],
-    ["已被合并", d?.merged],
-    ["被找到次数", d?.retrieval_count],
-    [
-      "空结果率",
-      d?.empty_result_rate == null
-        ? "—"
-        : (d.empty_result_rate * 100).toFixed(1) + "%",
-    ],
-    [
-      "词法降级率",
-      d?.degraded_rate == null ? "—" : (d.degraded_rate * 100).toFixed(1) + "%",
-    ],
-    ["索引失败", d?.index_failed],
-    [
-      "平均返回 token",
-      typeof d?.average_returned_tokens === "number"
-        ? d.average_returned_tokens.toFixed(1)
-        : "—",
-    ],
+  const metricGroups = [
+    {
+      title: "记忆规模",
+      items: [
+        ["已激活记忆", d?.active],
+        ["已归档", d?.archived],
+        ["记忆内容 token", d?.memory_total_tokens],
+      ],
+    },
+    {
+      title: "检索质量",
+      items: [
+        [
+          "有结果率",
+          (d?.result_rate ?? d?.hit_effective_rate) == null
+            ? "—"
+            : ((d?.result_rate ?? d?.hit_effective_rate)! * 100).toFixed(1) +
+              "%",
+        ],
+        [
+          "标注 Hit@1（答案第 1 位）",
+          d?.labeled_hit_at_1 == null
+            ? "—"
+            : (d.labeled_hit_at_1 * 100).toFixed(1) + "%",
+        ],
+        [
+          "标注 Hit@3（答案前 3 位）",
+          d?.labeled_hit_at_3 == null
+            ? "—"
+            : (d.labeled_hit_at_3 * 100).toFixed(1) + "%",
+        ],
+        [
+          "空结果率",
+          d?.empty_result_rate == null
+            ? "—"
+            : (d.empty_result_rate * 100).toFixed(1) + "%",
+        ],
+      ],
+    },
+    {
+      title: "检索成本与健康",
+      items: [
+        ["提取内容 token", d?.extraction_total_tokens],
+        [
+          "平均返回 token",
+          typeof d?.average_returned_tokens === "number"
+            ? d.average_returned_tokens.toFixed(1)
+            : "—",
+        ],
+        ["被找到次数", d?.retrieval_count],
+        ["索引失败", d?.index_failed],
+      ],
+    },
   ];
   return (
     <>
@@ -666,11 +732,18 @@ export function Stats({
         <span className="muted">{rebuildResult}</span>
       </div>
       <State loading={data.loading} error={data.error}>
-        <div className="metric-grid">
-          {metrics.map(([label, value]) => (
-            <section className="metric" key={label}>
-              <span>{label}</span>
-              <strong>{value ?? "—"}</strong>
+        <div className="metric-groups">
+          {metricGroups.map((group) => (
+            <section className="metric-group" key={group.title}>
+              <h3>{group.title}</h3>
+              <div className="metric-grid">
+                {group.items.map(([label, value]) => (
+                  <section className="metric" key={String(label)}>
+                    <span>{label}</span>
+                    <strong>{value ?? "—"}</strong>
+                  </section>
+                ))}
+              </div>
             </section>
           ))}
         </div>
@@ -681,13 +754,24 @@ export function Stats({
               当前未配置向量编码器，检索只能走词法匹配（词法降级率会接近
               100%）。到「设置 → 检索配置」填写 embeddingModel /
               embeddingBaseUrl / embeddingDimension
-              后保存，可启用语义检索、明显提升召回率与有效命中率。
+              后保存，可启用语义检索、明显提升召回率与有结果率。
             </div>
           )}
           <p>
-            <strong>有效命中率</strong> = 至少返回一条记忆的检索次数 ÷
-            检索总次数。它统计的是辅助助手实际发起的搜索，不包含手动浏览；历史窗口内此前因检索缺陷产生的空结果也会计入，修复后新的检索会逐步稀释它们，也可把时间范围切到「最近
-            1 天」观察最新表现。
+            <strong>有结果率</strong> = 至少返回一条记忆的检索次数 ÷
+            检索总次数。它只说明“有没有搜到东西”，不代表搜到的是否正确；样本若来自压测或预筛过的可答查询，这个数字会偏高，不能当作检索质量。
+          </p>
+          <p>
+            <strong>标注 Hit@1 / Hit@3 是什么？</strong>{" "}
+            假设一条测试查询的标准答案是记忆 A：A 排在返回结果第 1 位 → Hit@1
+            命中；A 排在第 2 或第 3 位 → Hit@3 命中；A 不在前 3 → 未命中。标注
+            Hit@1 74.5% 表示 200 条有标准答案的测试中约 149
+            条把答案排在第 1 位。普通搜索没有标准答案，因此显示为“—”。
+          </p>
+          <p>
+            <strong>重建相似关系</strong> 会扫描当前账户全部记忆，按内容相似度（默认
+            0.55）重新生成 memory_similarity
+            自动关系，用于检索时折叠高度相似记忆、减少重复内容；它不会修改或删除手动关系链（links）。
           </p>
           <p>
             <strong>提取内容 token</strong> 为所选时间范围内实际返回内容的累计估算，用于衡量检索带来的上下文成本，不代表计费
@@ -729,7 +813,8 @@ export function Stats({
                   <th>内容 token</th>
                   <th>检索请求</th>
                   <th>提取 token</th>
-                  <th>有效命中率</th>
+                  <th>有结果率</th>
+                  <th>标注 Hit@1 / @3</th>
                   <th>活跃 / 归档 / 合并</th>
                 </tr>
               </thead>
@@ -753,9 +838,19 @@ export function Stats({
                     <td>{a.search_requests}</td>
                     <td>{a.extraction_total_tokens}</td>
                     <td>
-                      {a.hit_effective_rate == null
+                      {(a.result_rate ?? a.hit_effective_rate) == null
                         ? "—"
-                        : (a.hit_effective_rate * 100).toFixed(1) + "%"}
+                        : (
+                            (a.result_rate ?? a.hit_effective_rate)! * 100
+                          ).toFixed(1) + "%"}
+                    </td>
+                    <td>
+                      {a.labeled_hit_at_1 == null || a.labeled_hit_at_3 == null
+                        ? "—"
+                        : (a.labeled_hit_at_1 * 100).toFixed(1) +
+                          "% / " +
+                          (a.labeled_hit_at_3 * 100).toFixed(1) +
+                          "%"}
                     </td>
                     <td>
                       {a.active} / {a.archived} / {a.merged}

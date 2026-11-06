@@ -591,7 +591,11 @@ export async function registerAdmin(
         "listMemories",
         subject(q),
         {
-          status: q.status || undefined,
+          status:
+            q.status === "merged"
+              ? "archived"
+              : q.status || undefined,
+          merged: q.status === "merged" ? true : undefined,
           type: path === "/profiles" ? "profile" : q.type || undefined,
           query: q.q || undefined,
           offset: start,

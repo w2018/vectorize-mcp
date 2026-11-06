@@ -46,6 +46,10 @@ export interface AccountStats {
   search_requests: number;
   extraction_total_tokens: number;
   hit_effective_rate: number | null;
+  result_rate?: number | null;
+  labeled_search_requests?: number;
+  labeled_hit_at_1?: number | null;
+  labeled_hit_at_3?: number | null;
   active: number;
   archived: number;
   merged: number;
@@ -123,6 +127,9 @@ export interface Link {
   revision: number;
   created_at: number;
   updated_at?: number;
+  /** link = 手动关系链；similarity = memory_similarity 自动相似边（只读）。 */
+  kind?: "link" | "similarity";
+  similarity?: number;
 }
 export interface Graph {
   nodes: Memory[];

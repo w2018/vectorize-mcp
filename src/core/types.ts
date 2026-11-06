@@ -142,6 +142,8 @@ export interface SearchInput extends Request {
   token_budget?: number;
   types?: MemoryType[];
   embedding?: Embedding;
+  /** Evaluation-only ground truth ids; normal callers must omit this. */
+  expected_ids?: string[];
 }
 export interface GetInput {
   ids: string[];
@@ -206,12 +208,21 @@ export type ReturnedMemory = Pick<
 >;
 export type ReturnedSearchItem = ReturnedMemory &
   Pick<SearchItem, "relevance" | "scoring_mode" | "via">;
+export interface SearchEvaluation {
+  labeled: true;
+  expected_count: number;
+  hit_at_1: boolean;
+  hit_at_3: boolean;
+  best_rank: number | null;
+}
 export interface SearchData {
   items: ReturnedSearchItem[];
   mode: "semantic" | "lexical";
   estimated_tokens: number;
   estimated: true;
   budget_exhausted: boolean;
+  /** Present only when the caller supplied evaluation ground truth. */
+  evaluation?: SearchEvaluation;
 }
 export interface Envelope<T> {
   ok: true;
@@ -231,6 +242,7 @@ export interface MemoryFilters {
   limit?: number;
   offset?: number;
   min_importance?: number;
+  merged?: boolean;
 }
 export interface TokenInfo {
   id: string;

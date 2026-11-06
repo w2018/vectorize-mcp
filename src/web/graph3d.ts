@@ -84,7 +84,7 @@ function nodePosition(memory: Memory): Vector3 {
   const y = unit(hash(memory.id, 17)) * 2 - 1;
   const angle = unit(hash(memory.id, 71)) * Math.PI * 2;
   const ring = Math.sqrt(Math.max(0, 1 - y * y));
-  const radius = 88 + unit(hash(memory.id, 137)) * 48;
+  const radius = 120 + unit(hash(memory.id, 137)) * 80;
   return new Vector3(
     Math.cos(angle) * ring * radius,
     y * radius,
@@ -297,13 +297,13 @@ export function Graph3D({
       positions.set(memory.id, position);
       memories[index] = memory;
       const weight = clamp(Number(memory.weight) || 0, 0, 1);
-      const size = 3.2 + weight * 3.8;
+      const size = 1.6 + weight * 2.0;
       scale.setScalar(size);
       matrix.compose(position, rotation, scale);
       nodeMesh.setMatrixAt(index, matrix);
       const color = new Color(colors[memory.type] || "#55d8c2");
       nodeMesh.setColorAt(index, color);
-      scale.setScalar(size * 2.15);
+      scale.setScalar(size * 1.8);
       matrix.compose(position, rotation, scale);
       glowMesh.setMatrixAt(index, matrix);
     });
@@ -458,7 +458,7 @@ export function Graph3D({
     let shownHoverId: string | null | undefined;
     let yaw = 0.62;
     let pitch = 0.26;
-    let distance = 350;
+    let distance = 450;
     const target = new Vector3();
     let dragging = false;
     let moved = false;
@@ -580,7 +580,7 @@ export function Graph3D({
     const wheel = (event: WheelEvent) => {
       event.preventDefault();
       flight = null;
-      distance = clamp(distance * Math.exp(event.deltaY * 0.001), 80, 720);
+      distance = clamp(distance * Math.exp(event.deltaY * 0.001), 120, 900);
       lastInteraction = performance.now();
     };
     const keyDown = (event: KeyboardEvent) => {
@@ -590,8 +590,8 @@ export function Graph3D({
       else if (event.key === "ArrowRight") yaw -= 0.1;
       else if (event.key === "ArrowUp") pitch = clamp(pitch - 0.1, -1.42, 1.42);
       else if (event.key === "ArrowDown") pitch = clamp(pitch + 0.1, -1.42, 1.42);
-      else if (event.key === "+" || event.key === "=") distance = Math.max(80, distance - 18);
-      else if (event.key === "-") distance = Math.min(720, distance + 18);
+      else if (event.key === "+" || event.key === "=") distance = Math.max(120, distance - 18);
+      else if (event.key === "-") distance = Math.min(900, distance + 18);
       else if (event.key === " ") userPaused = !userPaused;
       else handled = false;
       if (handled) {

@@ -1566,6 +1566,10 @@ export class Store {
           search_requests: stats.search_requests,
           extraction_total_tokens: stats.extraction_total_tokens,
           hit_effective_rate: stats.hit_effective_rate,
+          result_rate: stats.result_rate,
+          labeled_search_requests: stats.labeled_search_requests,
+          labeled_hit_at_1: stats.labeled_hit_at_1,
+          labeled_hit_at_3: stats.labeled_hit_at_3,
           active: stats.active,
           archived: stats.archived,
           merged: stats.merged,
@@ -2645,6 +2649,14 @@ export class Store {
     );
     check((input.keywords ?? []).length <= 12);
     for (const k of input.keywords ?? []) this.text(k, 1, 32);
+    if (input.expected_ids) {
+      check(
+        Array.isArray(input.expected_ids) &&
+          input.expected_ids.length <= 20 &&
+          new Set(input.expected_ids).size === input.expected_ids.length,
+      );
+      for (const id of input.expected_ids) check(uuid(id));
+    }
     // 检索词来自 keywords + query 本身；中文额外拆 2 字词，避免「必须显式给 keywords 才命中」。
     const terms: string[] = [];
     const addTerm = (value: string) => {
@@ -2939,6 +2951,22 @@ export class Store {
           retrieval_count: current.retrieval_count,
         };
       });
+      const expected = new Set(input.expected_ids ?? []);
+      const ranks = expected.size
+        ? items
+            .map((item, index) => (expected.has(item.id) ? index + 1 : null))
+            .filter((rank): rank is number => rank !== null)
+        : [];
+      const evaluation =
+        expected.size > 0
+          ? {
+              labeled: true as const,
+              expected_count: expected.size,
+              hit_at_1: ranks.includes(1),
+              hit_at_3: ranks.some((rank) => rank <= 3),
+              best_rank: ranks.length ? Math.min(...ranks) : null,
+            }
+          : undefined;
       return {
         data: {
           items,
@@ -2946,6 +2974,7 @@ export class Store {
           estimated_tokens: prepared.estimatedTokens,
           estimated: true,
           budget_exhausted: prepared.budgetExhausted,
+          ...(evaluation ? { evaluation } : {}),
         },
         ids: items.map((m) => m.id),
         effective: true,
@@ -2966,6 +2995,7 @@ export class Store {
     let items = this.all(subjectId).filter(
       (m) =>
         (!filters.status || m.status === filters.status) &&
+        (!filters.merged || Boolean(m.merged_into)) &&
         (!filters.type || m.type === filters.type) &&
         (!filters.query ||
           normalize(m.title + " " + m.content + " " + m.keywords.join(" "))
@@ -2998,10 +3028,31 @@ export class Store {
     const links = this.rows(
         "SELECT * FROM links WHERE subject_id=?",
         subjectId,
+      ).map((edge) => ({
+        id: String(edge.id),
+        source_id: String(edge.source_id),
+        target_id: String(edge.target_id),
+        type: String(edge.type),
+        strength: Number(edge.strength) || 0,
+        revision: Number(edge.revision) || 0,
+        created_at: Number(edge.created_at) || 0,
+        updated_at: Number(edge.updated_at) || 0,
+        kind: "link" as const,
+      })),
+      similarRows = this.rows(
+        "SELECT * FROM memory_similarity WHERE subject_id=? AND status<>'rejected' ORDER BY similarity DESC",
+        subjectId,
       ),
       focus = new Set([
         filters.focus_id,
         ...links
+          .filter(
+            (e) =>
+              e.source_id === filters.focus_id ||
+              e.target_id === filters.focus_id,
+          )
+          .flatMap((e) => [String(e.source_id), String(e.target_id)]),
+        ...similarRows
           .filter(
             (e) =>
               e.source_id === filters.focus_id ||
@@ -3019,7 +3070,31 @@ export class Store {
       edgeLimit = Math.max(1, Math.min(500, filters.edge_limit ?? 500)),
       nodes = all.sort((a, b) => b.weight - a.weight).slice(0, nodeLimit),
       ids = new Set(nodes.map((n) => n.id)),
-      edges = links.filter(
+      linkPairs = new Set(
+        links.map((e) =>
+          [String(e.source_id), String(e.target_id)].sort().join("|"),
+        ),
+      ),
+      similarityEdges = similarRows
+        .filter(
+          (e) =>
+            !linkPairs.has(
+              [String(e.source_id), String(e.target_id)].sort().join("|"),
+            ),
+        )
+        .map((e) => ({
+          id: String(e.id),
+          source_id: String(e.source_id),
+          target_id: String(e.target_id),
+          type: "similar",
+          strength: Number(e.similarity) || 0,
+          similarity: Number(e.similarity) || 0,
+          revision: 0,
+          created_at: Number(e.created_at) || 0,
+          updated_at: Number(e.updated_at) || 0,
+          kind: "similarity" as const,
+        })),
+      edges = [...links, ...similarityEdges].filter(
         (e) => ids.has(String(e.source_id)) && ids.has(String(e.target_id)),
       );
     return {
@@ -3036,6 +3111,7 @@ export class Store {
       "%:" + subjectId,
       Date.now() - days * 86400000,
     ).map((r) => JSON.parse(String(r.response)) as Envelope<SearchData>);
+    const labeled = observations.filter((r) => r.data.evaluation?.labeled);
     const items = this.all(subjectId);
     return {
       days,
@@ -3073,6 +3149,19 @@ export class Store {
       hit_effective_rate: observations.length
         ? observations.filter((r) => r.data.items.length > 0).length /
           observations.length
+        : null,
+      result_rate: observations.length
+        ? observations.filter((r) => r.data.items.length > 0).length /
+          observations.length
+        : null,
+      labeled_search_requests: labeled.length,
+      labeled_hit_at_1: labeled.length
+        ? labeled.filter((r) => r.data.evaluation?.hit_at_1).length /
+          labeled.length
+        : null,
+      labeled_hit_at_3: labeled.length
+        ? labeled.filter((r) => r.data.evaluation?.hit_at_3).length /
+          labeled.length
         : null,
       retrieval_count: String(
         items

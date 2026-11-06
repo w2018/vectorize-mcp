@@ -373,6 +373,7 @@ export function Memories({
   const [reasonText, setReasonText] = useState("");
   const [restoreMemory, setRestoreMemory] = useState<Memory | null>(null);
   const action = useAction();
+  const accountTotal = accounts.find((a) => a.id === subject)?.memory_count;
   const records = useResource<Page<Memory>>(
     "/memories" +
       query({
@@ -445,9 +446,15 @@ export function Memories({
         title="记忆"
         description="把值得记住的事收在一起，需要时再找到。管理浏览不会增加被找到次数。"
       >
-        <button className="primary" onClick={() => setEditing(null)}>
-          ＋ 新建记忆
-        </button>
+        <div className="heading-actions">
+          <span className="heading-total">
+            <strong>{accountTotal ?? "—"}</strong>
+            <small>条记忆</small>
+          </span>
+          <button className="primary" onClick={() => setEditing(null)}>
+            ＋ 新建记忆
+          </button>
+        </div>
       </Heading>
       <Feedback error={action.error} notice={action.notice} />
       <section className="panel">
@@ -487,8 +494,9 @@ export function Memories({
               setCursor("");
             }}
           >
-            <option value="active">正在使用</option>
+            <option value="active">已激活记忆</option>
             <option value="archived">已归档</option>
+            <option value="merged">已合并</option>
           </select>
         </div>
         <State
