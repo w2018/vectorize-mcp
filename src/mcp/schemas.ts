@@ -1,4 +1,20 @@
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+/** Models often send words instead of UUIDs for request_id. Accept any text and
+ * map it deterministically to a valid UUID so retries with the same text remain
+ * idempotent instead of failing MCP input validation. */
+const toRequestId = (value: string): string => {
+  const trimmed = value.trim();
+  if (UUID_PATTERN.test(trimmed)) return trimmed.toLowerCase();
+  const bytes = [...createHash("sha256").update(trimmed).digest().subarray(0, 16)];
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Buffer.from(bytes).toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+};
 
 const text = (min: number, max: number) =>
   z
@@ -13,9 +29,17 @@ const id = z
   .describe(
     "Stable UUID within the authenticated account; never an account identity.",
   );
-const request_id = id.describe(
-  "Logical operation UUID. Reuse this UUID and identical arguments for transport retries; changed intent requires a new UUID.",
-);
+const request_id = z
+  .string()
+  .trim()
+  .min(1)
+  .max(200)
+  .transform(toRequestId)
+  .optional()
+  .transform((value) => value ?? randomUUID())
+  .describe(
+    "Optional logical operation id. Omit it in normal use; the server generates one. Reuse the same value only when retrying the identical write; changed intent requires a new id. Arbitrary text is accepted and normalized.",
+  );
 const revision = z
   .number()
   .int()
@@ -51,16 +75,38 @@ const token_budget = z
   .describe(
     "Shared output content budget; oversized facts are omitted, not truncated.",
   );
-export const sourceSchema = z
+const sourceObject = z
   .object({
-    platform: text(1, 128),
+    platform: text(0, 128).optional(),
     agent: text(0, 128).optional(),
     conversation_id: text(0, 256).optional(),
     message_id: text(0, 256).optional(),
     reference: text(0, 1024).optional(),
+    // Tolerated aliases: weaker models sometimes send kind/detail/name.
+    kind: text(0, 128).optional(),
+    detail: text(0, 1024).optional(),
+    name: text(0, 128).optional(),
   })
-  .strict()
-  .describe("Caller-supplied provenance only, never authorization identity.");
+  .passthrough();
+export const sourceSchema = z
+  .preprocess(
+    (value) => (typeof value === "string" ? { platform: value } : value),
+    sourceObject,
+  )
+  .transform((value) => {
+    const out: Record<string, string> = {};
+    const platform = value.platform ?? value.kind ?? value.name;
+    if (platform) out.platform = platform;
+    if (value.agent) out.agent = value.agent;
+    if (value.conversation_id) out.conversation_id = value.conversation_id;
+    if (value.message_id) out.message_id = value.message_id;
+    const reference = value.reference ?? value.detail;
+    if (reference) out.reference = reference;
+    return out;
+  })
+  .describe(
+    "Optional caller-supplied provenance (never authorization identity). Prefer a single platform string, e.g. {\"platform\":\"desktop\"}; omit this field when unsure.",
+  );
 export const profileSchema = z
   .object({
     profile_key: z
@@ -121,12 +167,20 @@ export const toolSchemas = {
   memory_add: z
     .object({
       request_id,
-      type: fields.type,
+      type: fields.type.describe(
+        "One of fact/preference/profile/project/decision/lesson/task/person/concept/persona. For most saves use fact or preference.",
+      ),
       title: fields.title.default(""),
-      content: fields.content,
+      content: fields.content.describe(
+        "The single fact to remember, in one or two sentences. Required.",
+      ),
       keywords: keywords.default([]),
       importance: fields.importance.default(50),
-      source: sourceSchema,
+      source: sourceSchema
+        .optional()
+        .describe(
+          "Optional provenance. Omit it entirely unless you truly know where this fact came from; never send kind/detail.",
+        ),
       sensitivity: fields.sensitivity.default("normal"),
       valid_from: timestamp.optional(),
       valid_until: timestamp.optional(),
@@ -200,7 +254,7 @@ export const toolDescriptions: Record<ToolName, string> = {
   memory_get:
     "Read up to five known authorized memory IDs within a shared budget, without incrementing retrieval counts. This does not replace semantic search. Omitted or unauthorized IDs reveal no existence information.",
   memory_add:
-    "Save one atomic durable fact, preference, decision or lesson, never chat transcripts, passwords, tokens or private keys. Importance is 1–99 and genuinely affects retrieval ranking, so score lasting facts higher than trivia. Exact duplicates return the existing item; similar memories are linked automatically for de-duplicated recall, never automatically merged. Cannot set counts or weights. Profiles require profile details. Runs silently: do not report or recap the write to the user after success.",
+    "Save one atomic durable fact, preference, decision or lesson, never chat transcripts, passwords, tokens or private keys. Required: type and content only. Everything else is optional—omit request_id and omit source unless you actually know it (source, if used, is {platform:'desktop'}, never kind/detail). Importance is 1–99 and genuinely affects retrieval ranking, so score lasting facts higher than trivia. Exact duplicates return the existing item; similar memories are linked automatically for de-duplicated recall, never automatically merged. Cannot set counts or weights. Profiles require profile details. Runs silently: do not report or recap the write to the user after success.",
   memory_update:
     "Update an existing memory using expected_revision and a restricted patch. Content changes rerun duplicate checks. On revision conflict read current state and decide again; never blindly overwrite. Explicit confirm_current evidence is needed to refresh fact confirmation time. Runs silently: do not report or recap the update to the user after success.",
   memory_merge:

@@ -41,7 +41,9 @@ parentPort!.on(
           id: message.id,
           error: {
             code: err.code ?? "INTERNAL_ERROR",
-            message: err.code ?? "Database operation failed",
+            // Preserve the human-readable domain message (e.g. TYPE_NOT_ALLOWED)
+            // so clients can self-correct instead of only seeing a generic failure.
+            message: err.message || err.code || "Database operation failed",
             retryable: err.retryable ?? false,
           },
         });

@@ -184,13 +184,25 @@ export class MemoryService implements McpService<Context> {
     args: Record<string, unknown>,
   ): Promise<unknown> {
     if (!Object.prototype.hasOwnProperty.call(toolSchemas, tool))
-      throw new DomainError("VALIDATION_ERROR");
-    // 只读检索允许省略 request_id：服务端补一个，避免客户端漏传直接校验失败。
-    if (tool === "memory_search" && typeof args.request_id !== "string")
+      throw new DomainError("VALIDATION_ERROR", "Unknown tool");
+    // request_id is optional on every tool. When omitted, fill a fresh UUID so
+    // weak models cannot fail input validation just because they did not invent one.
+    if (typeof args.request_id !== "string" || !args.request_id.trim())
       args = { ...args, request_id: randomUUID() };
     const parsed = toolSchemas[tool].safeParse(args);
-    if (!parsed.success)
-      throw new DomainError("VALIDATION_ERROR", "Invalid tool arguments");
+    if (!parsed.success) {
+      const issues = parsed.error.issues
+        .map((issue) => {
+          const field = issue.path.join(".") || "(root)";
+          return field + ": " + issue.message;
+        })
+        .slice(0, 6)
+        .join("; ");
+      throw new DomainError(
+        "VALIDATION_ERROR",
+        "Invalid tool arguments — " + issues,
+      );
+    }
     await this.validate(ctx);
     const input = parsed.data;
     const embedding = [
