@@ -357,8 +357,20 @@ export function query(
     if (v !== undefined && v !== "") p.set(k, String(v));
   return "?" + p;
 }
+function randomId(): string {
+  const source = globalThis.crypto;
+  if (source && typeof source.randomUUID === "function") return source.randomUUID();
+  const bytes = new Uint8Array(16);
+  if (source && typeof source.getRandomValues === "function") source.getRandomValues(bytes);
+  else for (let i = 0; i < bytes.length; i += 1) bytes[i] = Math.floor(Math.random() * 256);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 export function writeBody(data: Record<string, unknown>) {
-  return { ...data, request_id: crypto.randomUUID() };
+  return { ...data, request_id: randomId() };
 }
 export function errorText(error: unknown) {
   return error instanceof Error ? error.message : "操作未完成，请重试。";
