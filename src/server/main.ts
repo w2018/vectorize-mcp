@@ -2,8 +2,10 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { hashPassword } from "./password.js";
 import { buildApp } from "./app.js";
+import { readServerConfig } from "./server-config.js";
 const dataDir = resolve(process.env.DATA_DIR ?? "data");
 const passwordFile = join(dataDir, "admin-password.json");
+const serverConfigFile = join(dataDir, "server-config.json");
 await mkdir(dataDir, { recursive: true });
 if (process.argv.includes("init-admin")) {
   const password = process.env.ADMIN_PASSWORD;
@@ -40,16 +42,12 @@ if (process.argv.includes("init-admin")) {
   };
   if (!/^[0-9a-f]{32}:[0-9a-f]{128}$/.test(stored.hash))
     throw new Error("Invalid administrator password file");
-  const port = Number(process.env.PORT ?? 3100);
-  if (!Number.isInteger(port) || port < 1 || port > 65535)
-    throw new Error("Invalid PORT");
-  // 监听地址仅由 HOST 环境变量控制，默认对外开放（局域网可访问）。
-  // 浏览器访问地址按请求 Host 自动判断同源，不再保存或校验对外 origin。
-  const host = process.env.HOST ?? "0.0.0.0";
-  if (host !== "127.0.0.1" && host !== "0.0.0.0")
-    throw new Error("HOST must be 127.0.0.1 or 0.0.0.0");
+  // 监听 IP 与端口来自 data/server-config.json；修改后重启服务生效。
+  const serverConfig = await readServerConfig(serverConfigFile);
+  const host = serverConfig.host;
+  const port = serverConfig.port;
   const displayHost = host === "0.0.0.0" ? "127.0.0.1" : host;
-  const origin = process.env.PUBLIC_ORIGIN ?? "http://" + displayHost + ":" + port;
+  const origin = "http://" + displayHost + ":" + port;
   const { app } = await buildApp({
     databasePath: join(dataDir, "memory.sqlite"),
     passwordHash: stored.hash,
@@ -75,8 +73,8 @@ if (process.argv.includes("init-admin")) {
       host +
       ":" +
       port +
-      " — public origin " +
-      origin +
+      " — 配置文件 " +
+      serverConfigFile +
       " — MCP endpoint /mcp",
   );
 }

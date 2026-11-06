@@ -55,13 +55,11 @@ Windows 与 Linux 行为一致：初始化只在本机保存 scrypt 哈希；已
 | 变量 | 说明 |
 | --- | --- |
 | `DATA_DIR` | 数据目录，默认 `data`，建议使用固定绝对路径 |
-| `HOST` / `PORT` | 监听地址与端口，默认 `0.0.0.0:3100`（局域网可访问）；如需仅本机可设 `HOST=127.0.0.1` |
-| `PUBLIC_ORIGIN` | 可选，仅用于日志与默认 Cookie origin；浏览器访问改为按请求 Host 自动同源判断，一般无需设置 |
 | `ADMIN_PASSWORD` | 仅用于 `npm run init-admin` |
 | `EMBEDDING_BASE_URL` / `EMBEDDING_MODEL` / `EMBEDDING_DIMENSION` | 可选编码器，三项同时设置或全部省略 |
 | `EMBEDDING_API_KEY` | 可选服务端编码器密钥，不通过后台返回 |
 
-服务默认监听 `0.0.0.0`，同一局域网可直接用本机 IP 访问；不再要求填写对外 origin，也不强制 HTTPS。
+监听 IP 与端口放在 `<DATA_DIR>/server-config.json`，首次启动自动生成默认值 `{ "host": "0.0.0.0", "port": 3100 }`。修改文件后重启服务生效；不再读取 HOST / PORT 环境变量。
 
 ## 管理员密码
 
@@ -70,7 +68,7 @@ Windows 与 Linux 行为一致：初始化只在本机保存 scrypt 哈希；已
 
 ## 监听地址
 
-监听地址仅由 `HOST` 环境变量控制，默认 `0.0.0.0`（局域网可访问）；设置 `HOST=127.0.0.1` 可限制仅本机。Web 设置不再提供监听地址选项。
+编辑 `<DATA_DIR>/server-config.json` 的 `host` 与 `port`，重启服务生效。例如仅本机：`{ "host": "127.0.0.1", "port": 3100 }`；局域网访问保持 `0.0.0.0`。
 
 ## 在线更新
 
@@ -110,6 +108,7 @@ HTTP 客户端填写 `http://127.0.0.1:3100/mcp`，并发送请求头 `Authoriza
 ```text
 data/
   admin-password.json          管理员密码哈希
+  server-config.json           监听 IP 与端口（修改后重启生效）
   memory.sqlite                主数据库
   memory.sqlite.logs.sqlite    独立观察日志库
   memory.sqlite.trash.sqlite   回收站快照库
