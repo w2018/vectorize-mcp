@@ -1410,6 +1410,8 @@ function EncoderSettings({
   const [selected, setSelected] = useState("");
   const [result, setResult] = useState<EncoderTestResult | null>(null);
   const [models, setModels] = useState<string[]>([]);
+  /** 真实能出向量的模型（逐个探测得出）；列表非空时优先只显示这些。 */
+  const [embeddable, setEmbeddable] = useState<string[] | null>(null);
   const [modelsError, setModelsError] = useState("");
   const [keyInput, setKeyInput] = useState("");
   const [keyState, setKeyState] = useState<EncoderKeyStatus | null>(null);
@@ -1427,6 +1429,9 @@ function EncoderSettings({
   }, [presets.data]);
 
   const items = presets.data?.items ?? [];
+  // 有实测结论时只列真正能出向量的模型；否则退回完整列表（用户可手填）。
+  const choices =
+    embeddable && embeddable.length > 0 ? embeddable : models;
   const preset = items.find((item) => item.key === selected);
   const configured = Boolean(draft.embeddingModel);
   const addressAndModel =
@@ -1473,8 +1478,12 @@ function EncoderSettings({
     }
     setBusy("models");
     setModelsError("");
+    setEmbeddable(null);
+    // probe=true：网关的 /models 常把聊天模型与向量模型混列（有的甚至列不出真正的
+    // 向量模型），逐个试一次 /embeddings 才能知道哪个能用，避免「选了就测试失败」。
     void api<EncoderModelsResult>("/config/embedding-models", "POST", {
       baseUrl: draft.embeddingBaseUrl.trim(),
+      probe: true,
       ...(keyInput.trim() ? { api_key: keyInput.trim() } : {}),
     })
       .then((data) => {
@@ -1484,9 +1493,16 @@ function EncoderSettings({
           return;
         }
         setModels(data.models);
+        setEmbeddable(data.embeddable ?? null);
         if (!data.models.length)
           setModelsError("服务返回了空的模型列表，请手动填写模型名。");
-        else setModelsError("");
+        else if (Array.isArray(data.embeddable)) {
+          setModelsError(
+            data.embeddable.length
+              ? ""
+              : "该服务的模型列表里没有能出向量的模型，请手动填写向量模型名（例如 bge-m3）。",
+          );
+        } else setModelsError("");
       })
       .catch((e: unknown) =>
         setModelsError(e instanceof Error ? e.message : "拉取模型失败"),
@@ -1634,7 +1650,7 @@ function EncoderSettings({
               {busy === "models" ? "拉取中…" : "拉取模型"}
             </button>
           </span>
-          {models.length > 0 && (
+          {choices.length > 0 && (
             <select
               value=""
               onChange={(e) => {
@@ -1643,8 +1659,11 @@ function EncoderSettings({
                 setDraft({ ...draft, embeddingModel: e.target.value });
               }}
             >
-              <option value="">从 {models.length} 个模型中选择…</option>
-              {models.map((name) => (
+              <option value="">
+                从 {choices.length} 个可用模型中选择…
+                {embeddable && embeddable.length > 0 ? "（已实测能出向量）" : ""}
+              </option>
+              {choices.map((name) => (
                 <option key={name} value={name}>
                   {name}
                 </option>

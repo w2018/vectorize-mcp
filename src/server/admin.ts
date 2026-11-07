@@ -170,7 +170,13 @@ export async function registerAdmin(
     listEncoderModels?: (input: {
       baseUrl: string;
       apiKey?: string;
-    }) => Promise<{ ok: boolean; models: string[]; error?: string }>;
+      probe?: boolean;
+    }) => Promise<{
+      ok: boolean;
+      models: string[];
+      embeddable?: string[];
+      error?: string;
+    }>;
     /** 只返回 has_key / source，绝不回显明文。 */
     keyStatus?: () => { has_key: boolean; source: "file" | "env" | "none" };
     /** 保存或清除界面输入的 API Key（空串=清除）。 */
@@ -820,7 +826,9 @@ export async function registerAdmin(
       typeof b.api_key === "string" && b.api_key.trim()
         ? b.api_key.trim()
         : undefined;
-    return options.listEncoderModels({ baseUrl, apiKey });
+    // probe=true 时逐个真打 /embeddings，把「列表里有但不是向量模型」的项筛出来，
+    // 避免用户选到聊天模型后测试连接必然失败。
+    return options.listEncoderModels({ baseUrl, apiKey, probe: b.probe === true });
   });
   route("POST", "/config/preview", async (req) => {
     const b = body(req),

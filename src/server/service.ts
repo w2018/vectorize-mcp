@@ -591,15 +591,24 @@ export class MemoryService implements McpService<Context> {
         } catch {
           /* keep raw text */
         }
-        const detail =
-          response.status === 401 || response.status === 403
-            ? "鉴权失败：API Key 无效或未设置。"
-            : response.status === 404
-              ? "接口不存在：确认地址是 OpenAI 兼容基址，且不要包含 /embeddings 后缀。"
-              : "服务拒绝请求（HTTP " +
-                response.status +
-                "）" +
-                (reason ? "：" + reason : "。");
+        let detail: string;
+        if (response.status === 401 || response.status === 403) {
+          detail = "鉴权失败：API Key 无效或未设置。";
+        } else if (response.status === 404) {
+          detail =
+            "接口不存在：确认地址是 OpenAI 兼容基址，且不要包含 /embeddings 后缀。";
+        } else {
+          detail =
+            "服务拒绝请求（HTTP " +
+            response.status +
+            "）" +
+            (reason ? "：" + reason : "。");
+          // 聚合网关把聊天模型也列进 /models：选错后就是这句「embedding model [x] not found」。
+          // 直接点明原因并给出下一步，避免用户以为是服务故障。
+          if (/embedding model/i.test(reason) && /not found|unknown|no model/i.test(reason))
+            detail +=
+              "\n该模型不是向量模型（聊天模型无法生成向量）。请填该服务真正的向量模型名，例如 bge-m3、text-embedding-3-small、text-embedding-v3、nomic-embed-text；地址正确时可点「拉取模型」自动筛出能出向量的项。";
+        }
         return { ok: false, error: detail };
       }
       const payload: unknown = await response.json();
@@ -619,11 +628,22 @@ export class MemoryService implements McpService<Context> {
       return { ok: false, error: this.readableEncoderError(error) };
     }
   }
-  /** 拉取该服务提供的模型列表（OpenAI 兼容 GET /models）。 */
+  /**
+   * 拉取该服务提供的模型列表（OpenAI 兼容 GET /models）。
+   * probe=true 时逐个真实调用一次 /embeddings，标出哪些模型真的能出向量——聚合网关的
+   * /models 往往把聊天模型与向量模型混在一起（甚至像 magpie 那样根本列不出 bge-m3），
+   * 直接让用户从混杂列表里选，选到聊天模型后测试必然失败。
+   */
   async listModels(input: {
     baseUrl: string;
     apiKey?: string;
-  }): Promise<{ ok: boolean; models: string[]; error?: string }> {
+    probe?: boolean;
+  }): Promise<{
+    ok: boolean;
+    models: string[];
+    embeddable?: string[];
+    error?: string;
+  }> {
     let endpoint: URL;
     try {
       const url = new URL(input.baseUrl);
@@ -664,7 +684,54 @@ export class MemoryService implements McpService<Context> {
         .map((row) => (typeof row?.id === "string" ? row.id : ""))
         .filter((id) => Boolean(id))
         .sort();
-      return { ok: true, models };
+      if (!input.probe) return { ok: true, models };
+      const key = input.apiKey?.trim() || this.apiKey() || undefined;
+      const probeAll = async (candidates: string[]): Promise<string[]> => {
+        const found: string[] = [];
+        // 限并发 3，避免一次拉取把上游网关打满；单个模型探测失败只代表它不能出向量。
+        const queue = [...candidates];
+        const worker = async () => {
+          for (;;) {
+            const model = queue.shift();
+            if (!model) return;
+            const probe = await this.probeEmbedding({
+              baseUrl: input.baseUrl,
+              model,
+              ...(key ? { apiKey: key } : {}),
+            });
+            if (probe.ok) found.push(model);
+          }
+        };
+        await Promise.all([worker(), worker(), worker()]);
+        return found;
+      };
+      let embeddable = await probeAll(models);
+      // 聚合网关常常根本不把向量模型列进 /models（例如 magpie 列出 10 个聊天模型，
+      // 能出向量的 workbuddy/bge-m3 却不在列表里）。列表里一个向量模型都没有时，
+      // 用列表出现过的厂商前缀 × 常见向量模型名再探一轮，给出可点的候选。
+      if (!embeddable.length) {
+        const prefixes = new Set<string>();
+        for (const name of models) {
+          const cut = name.indexOf("/");
+          if (cut > 0) prefixes.add(name.slice(0, cut));
+        }
+        const common = [
+          "bge-m3",
+          "bge-large-zh-v1.5",
+          "text-embedding-3-small",
+          "text-embedding-v3",
+          "embedding-3",
+          "nomic-embed-text",
+        ];
+        const candidates = new Set<string>();
+        for (const base of common) {
+          candidates.add(base);
+          for (const prefix of prefixes) candidates.add(prefix + "/" + base);
+        }
+        embeddable = await probeAll([...candidates].slice(0, 40));
+      }
+      embeddable.sort();
+      return { ok: true, models, embeddable };
     } catch (error) {
       return { ok: false, models: [], error: this.readableEncoderError(error) };
     }
@@ -679,7 +746,7 @@ export class MemoryService implements McpService<Context> {
     if (/model mismatch/i.test(message))
       return "服务返回的 model 与填写的模型名不一致，请核对模型名。";
     if (/HTTP 401|HTTP 403/i.test(message))
-      return "鉴权失败：请确认服务端环境变量 EMBEDDING_API_KEY 已设置且有效。";
+      return "鉴权失败：请确认密钥已填写（界面保存或 EMBEDDING_API_KEY），且对该服务有效。";
     if (/HTTP 404/i.test(message))
       return "接口不存在：确认地址是 OpenAI 兼容基址，且不要包含 /embeddings 后缀。";
     if (/HTTP/i.test(message)) return message + "（服务端拒绝请求）。";

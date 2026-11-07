@@ -92,6 +92,8 @@ export interface EncoderTestResult {
 export interface EncoderModelsResult {
   ok: boolean;
   models: string[];
+  /** 逐个真实调用 /embeddings 后确认能出向量的模型（probe=true 时返回）。 */
+  embeddable?: string[];
   error?: string;
 }
 export interface EncoderKeyStatus {
