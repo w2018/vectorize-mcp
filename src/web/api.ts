@@ -73,13 +73,30 @@ export interface EncoderPresetsResponse {
   active: string;
   /** 服务端是否设置了 EMBEDDING_API_KEY（只回布尔，不回密钥）。 */
   key_from_env: boolean;
+  /** 生效中的 Key 状态：来自加密文件还是环境变量，只回布尔结论。 */
+  key?: { has_key: boolean; source: "file" | "env" | "none" };
+  /** 是否支持在界面里保存 Key（文件路径未配置时为 false）。 */
+  can_store_key?: boolean;
 }
 export interface EncoderTestResult {
   ok: boolean;
   model: string;
+  /** 服务实际返回的向量维度；探测失败时为 0。 */
   dimension: number;
+  /** 界面填写的维度（留空为 0）。 */
+  declared_dimension?: number;
+  dimension_matched?: boolean;
   elapsed_ms: number;
   error?: string;
+}
+export interface EncoderModelsResult {
+  ok: boolean;
+  models: string[];
+  error?: string;
+}
+export interface EncoderKeyStatus {
+  has_key: boolean;
+  source: "file" | "env" | "none";
 }
 export type { AccountKind, BotPreset, BotProfile, BotSettings, MemoryType } from "../core/types";
 import type { AccountKind, MemoryType } from "../core/types";

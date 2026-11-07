@@ -155,14 +155,28 @@ export async function registerAdmin(
     testEncoder?: (input: {
       baseUrl: string;
       model: string;
-      dimension: number;
+      dimension?: number;
+      apiKey?: string;
     }) => Promise<{
       ok: boolean;
       model: string;
       dimension: number;
+      declared_dimension: number;
+      dimension_matched: boolean;
       elapsed_ms: number;
       error?: string;
     }>;
+    /** 拉取编码服务的模型列表（GET {baseUrl}/models）。 */
+    listEncoderModels?: (input: {
+      baseUrl: string;
+      apiKey?: string;
+    }) => Promise<{ ok: boolean; models: string[]; error?: string }>;
+    /** 只返回 has_key / source，绝不回显明文。 */
+    keyStatus?: () => { has_key: boolean; source: "file" | "env" | "none" };
+    /** 保存或清除界面输入的 API Key（空串=清除）。 */
+    saveKey?: (
+      apiKey: string,
+    ) => { has_key: boolean; source: "file" | "env" | "none" };
   },
 ): Promise<void> {
   const installRoot = resolve(options.updateRoot ?? process.cwd());
@@ -778,7 +792,36 @@ export async function registerAdmin(
         }>("getConfig"),
       )?.key ?? "custom",
     key_from_env: Boolean(process.env.EMBEDDING_API_KEY),
+    key: options.keyStatus
+      ? options.keyStatus()
+      : {
+          has_key: Boolean(process.env.EMBEDDING_API_KEY),
+          source: process.env.EMBEDDING_API_KEY ? "env" : "none",
+        },
+    can_store_key: Boolean(options.saveKey),
   }));
+  // 保存/清除编码器 Key：界面输入 → 加密落盘，返回值只有状态，不回显明文。
+  route("POST", "/config/embedding-key", async (req) => {
+    if (!options.saveKey) throw new DomainError("FEATURE_DISABLED");
+    const b = body(req);
+    if (b.api_key !== undefined && typeof b.api_key !== "string")
+      throw new DomainError("VALIDATION_ERROR");
+    const raw = typeof b.api_key === "string" ? b.api_key.trim() : "";
+    if (raw.length > 512) throw new DomainError("VALIDATION_ERROR");
+    return options.saveKey(raw);
+  });
+  // 拉取该服务提供的模型列表，供设置页下拉选择，避免手打模型名出错。
+  route("POST", "/config/embedding-models", async (req) => {
+    if (!options.listEncoderModels) throw new DomainError("FEATURE_DISABLED");
+    const b = body(req);
+    const baseUrl = text(b.baseUrl).trim();
+    if (!baseUrl) throw new DomainError("VALIDATION_ERROR");
+    const apiKey =
+      typeof b.api_key === "string" && b.api_key.trim()
+        ? b.api_key.trim()
+        : undefined;
+    return options.listEncoderModels({ baseUrl, apiKey });
+  });
   route("POST", "/config/preview", async (req) => {
     const b = body(req),
       config = await read<{ revision: number }>("getConfig");
@@ -794,9 +837,25 @@ export async function registerAdmin(
     const model = text(b.model).trim();
     const dimension = Number(b.dimension);
     if (!baseUrl || !model) throw new DomainError("VALIDATION_ERROR");
-    if (!Number.isSafeInteger(dimension) || dimension < 1 || dimension > 8192)
-      throw new DomainError("VALIDATION_ERROR");
-    return options.testEncoder({ baseUrl, model, dimension });
+    // 维度可留空：由服务端返回的向量长度确定真实维度，供界面一键回填。
+    if (
+      b.dimension !== undefined &&
+      b.dimension !== null &&
+      b.dimension !== ""
+    ) {
+      if (!Number.isSafeInteger(dimension) || dimension < 1 || dimension > 8192)
+        throw new DomainError("VALIDATION_ERROR");
+    }
+    const apiKey =
+      typeof b.api_key === "string" && b.api_key.trim()
+        ? b.api_key.trim()
+        : undefined;
+    return options.testEncoder({
+      baseUrl,
+      model,
+      dimension: Number.isSafeInteger(dimension) && dimension > 0 ? dimension : undefined,
+      apiKey,
+    });
   });
   route("PATCH", "/config", async (req) => {
     const b = body(req);

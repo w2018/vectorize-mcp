@@ -15,6 +15,12 @@ export interface EmbeddingOptions {
   concurrency?: number;
   maxQueue?: number;
   fetch?: typeof fetch;
+  /**
+   * 是否在请求体里带 `dimensions`，让服务端按指定长度输出（OpenAI text-embedding-3、
+   * DashScope v3/v4、智谱 embedding-3 等支持）。不支持该参数的服务会返回 400，
+   * 此时自动退回不带 dimensions 的请求并记住结果，避免每条记忆都失败。
+   */
+  sendDimensions?: boolean;
 }
 export class EmbeddingError extends Error {
   readonly code = "EMBEDDING_UNAVAILABLE";
@@ -30,6 +36,8 @@ export class OpenAIEmbedding {
   private readonly waiting: Array<() => void> = [];
   private readonly options: EmbeddingOptions;
   private readonly endpoint: URL;
+  /** 服务是否接受 dimensions 参数；undefined 表示尚未探测。 */
+  private dimensionsSupport: boolean | undefined;
   constructor(options: EmbeddingOptions) {
     const url = new URL(options.baseUrl);
     if (
@@ -57,6 +65,7 @@ export class OpenAIEmbedding {
     }
     url.pathname = url.pathname.replace(/\/$/, "") + "/embeddings";
     this.endpoint = url;
+    this.dimensionsSupport = options.sendDimensions === false ? false : undefined;
     this.options = { ...options };
     this.descriptor = Object.freeze({
       provider: "openai-compatible",
@@ -96,22 +105,39 @@ export class OpenAIEmbedding {
       throw new EmbeddingError("Embedding input must not be empty");
     await this.acquire();
     try {
-      const response = await (this.options.fetch ?? fetch)(this.endpoint, {
-        method: "POST",
-        redirect: "error",
-        signal: AbortSignal.timeout(this.options.timeoutMs ?? 15000),
-        headers: {
-          "Content-Type": "application/json",
-          ...(this.options.apiKey
-            ? { Authorization: "Bearer " + this.options.apiKey }
-            : {}),
-        },
-        body: JSON.stringify({
-          model: this.descriptor.model,
-          input: text,
-          encoding_format: "float",
-        }),
-      });
+      const send = (withDimensions: boolean) =>
+        (this.options.fetch ?? fetch)(this.endpoint, {
+          method: "POST",
+          redirect: "error",
+          signal: AbortSignal.timeout(this.options.timeoutMs ?? 15000),
+          headers: {
+            "Content-Type": "application/json",
+            ...(this.options.apiKey
+              ? { Authorization: "Bearer " + this.options.apiKey }
+              : {}),
+          },
+          body: JSON.stringify({
+            model: this.descriptor.model,
+            input: text,
+            encoding_format: "float",
+            // 显式指定输出维度：否则服务端只按模型默认维度返回，维度框填其他值会全量失败。
+            ...(withDimensions && this.descriptor.dimension > 0
+              ? { dimensions: this.descriptor.dimension }
+              : {}),
+          }),
+        });
+      const wantsDimensions =
+        this.options.sendDimensions !== false && this.dimensionsSupport !== false;
+      let response = await send(wantsDimensions);
+      // 不支持 dimensions 的服务会回 400/422：退回不带该参数重试一次，并记住结论，
+      // 避免此后每条记忆都先失败一次。仍失败则按原错误上报。
+      if (wantsDimensions && (response.status === 400 || response.status === 422)) {
+        const retry = await send(false);
+        if (retry.ok) this.dimensionsSupport = false;
+        response = retry;
+      } else if (wantsDimensions && response.ok) {
+        this.dimensionsSupport = true;
+      }
       if (!response.ok)
         throw new EmbeddingError(
           "Embedding provider returned HTTP " + response.status,

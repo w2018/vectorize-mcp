@@ -3,6 +3,7 @@ import { resolve, join } from "node:path";
 import { hashPassword } from "./password.js";
 import { buildApp } from "./app.js";
 import { readServerConfig } from "./server-config.js";
+import { embeddingSecretPaths } from "./embedding-secret.js";
 const dataDir = resolve(process.env.DATA_DIR ?? "data");
 const passwordFile = join(dataDir, "admin-password.json");
 const serverConfigFile = join(dataDir, "server-config.json");
@@ -55,6 +56,7 @@ if (process.argv.includes("init-admin")) {
     backupDir: join(dataDir, "backups"),
     passwordFile,
     updateRoot: process.cwd(),
+    embeddingSecretPaths: embeddingSecretPaths(dataDir),
   });
   for (const signal of ["SIGINT", "SIGTERM"] as const)
     process.once(signal, () => {

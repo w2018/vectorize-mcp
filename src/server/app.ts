@@ -10,6 +10,7 @@ import { MemoryService } from "./service.js";
 import { registerAdmin } from "./admin.js";
 import { createMcpHandler } from "../mcp/http.js";
 import { createEmbeddingFromEnv } from "../embedding/openai.js";
+import { EmbeddingSecret } from "./embedding-secret.js";
 import { APP_VERSION } from "./version.js";
 export interface AppOptions {
   databasePath: string;
@@ -22,6 +23,11 @@ export interface AppOptions {
   passwordFile?: string;
   /** 安装根目录；在线更新在此覆盖程序文件。默认进程工作目录。 */
   updateRoot?: string;
+  /**
+   * 界面保存的编码器 API Key 落盘位置（加密文件 + 独立密钥）。
+   * 缺省时退回环境变量 EMBEDDING_API_KEY，设置页不显示输入框。
+   */
+  embeddingSecretPaths?: { configPath: string; keyPath: string };
 }
 export async function buildApp(options: AppOptions) {
   const unlock = await acquireInstanceLock(options.databasePath);
@@ -150,6 +156,10 @@ export async function buildApp(options: AppOptions) {
     // not shadow each other; they share one updateConfig call.
     const patch: Record<string, string | number> = {};
     if (config.tokenBudget === 600) patch.tokenBudget = 1200;
+    // v0.5.2: the lexical threshold used to be clamped by min(value, 0.2), so a
+    // stored 0.5 behaved exactly like 0.2. Now that the clamp is gone, migrate
+    // the legacy default so existing installs keep their observed recall.
+    if (config.lexicalThreshold === 0.5) patch.lexicalThreshold = 0.2;
     // Encoder settings from the environment are filled in at any revision;
     // gating on revision===1 used to silently defeat this after any config edit.
     if (encoder && !config.embeddingModel && !config.embeddingBaseUrl) {
@@ -174,7 +184,14 @@ export async function buildApp(options: AppOptions) {
         console.warn("[startup] config migration skipped:", error);
       }
     }
-    const service = new MemoryService(db, null, env);
+    const secret = options.embeddingSecretPaths
+      ? new EmbeddingSecret(
+          options.embeddingSecretPaths.configPath,
+          options.embeddingSecretPaths.keyPath,
+          env,
+        )
+      : null;
+    const service = new MemoryService(db, null, env, secret);
     const mcp = createMcpHandler(service);
     app.route({
       method: ["GET", "POST", "DELETE"],
@@ -211,6 +228,9 @@ export async function buildApp(options: AppOptions) {
       passwordFile: options.passwordFile,
       updateRoot: options.updateRoot,
       testEncoder: (input) => service.testEncoder(input),
+      listEncoderModels: (input) => service.listModels(input),
+      keyStatus: () => service.keyStatus(),
+      saveKey: (apiKey) => service.saveKey(apiKey),
     });
     app.get("/health", async () => ({ ok: true, version: APP_VERSION }));
     const webRoot = resolve(options.webRoot ?? "dist/web");

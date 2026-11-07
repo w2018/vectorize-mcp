@@ -29,7 +29,7 @@ export const ENCODER_PRESETS: EncoderPreset[] = [
     model: "text-embedding-3-small",
     dimension: 1536,
     needsKey: true,
-    summary: "通用效果好、按量计费；记忆正文会发送到 OpenAI。需要 EMBEDDING_API_KEY。",
+    summary: "通用效果好、按量计费；记忆正文会发送到 OpenAI。需要 EMBEDDING_API_KEY。维度可选 1536（默认）、1024、512：维度越低越省存储与算力，1024 是精度与成本的平衡点。",
   },
   {
     key: "dashscope",
@@ -38,7 +38,7 @@ export const ENCODER_PRESETS: EncoderPreset[] = [
     model: "text-embedding-v3",
     dimension: 1024,
     needsKey: true,
-    summary: "国内网络稳定、中文表现好；走 OpenAI 兼容模式。需要 EMBEDDING_API_KEY。",
+    summary: "国内网络稳定、中文表现好；走 OpenAI 兼容模式。需要 EMBEDDING_API_KEY。维度可选 1024（默认）、768、512，中文场景推荐 1024。",
   },
   {
     key: "zhipu",
@@ -47,7 +47,7 @@ export const ENCODER_PRESETS: EncoderPreset[] = [
     model: "embedding-3",
     dimension: 2048,
     needsKey: true,
-    summary: "国内可直连，embedding-3 默认 2048 维；自定义维度时以测试结果为准。需要 EMBEDDING_API_KEY。",
+    summary: "国内可直连。需要 EMBEDDING_API_KEY。维度 256～2048 可调，默认 2048 偏大；5000 条记忆建议 1024 以省一半存储与扫描时间。",
   },
   {
     key: "ollama",
@@ -56,7 +56,7 @@ export const ENCODER_PRESETS: EncoderPreset[] = [
     model: "nomic-embed-text",
     dimension: 768,
     needsKey: false,
-    summary: "完全本地、不联网、免密钥；首次需 ollama pull nomic-embed-text。速度取决于本机。",
+    summary: "完全本地、不联网、免密钥；首次需 ollama pull nomic-embed-text。维度固定 768，不能改。",
   },
   {
     key: "lmstudio",
@@ -65,7 +65,7 @@ export const ENCODER_PRESETS: EncoderPreset[] = [
     model: "text-embedding-nomic-embed-text-v1.5",
     dimension: 768,
     needsKey: false,
-    summary: "图形化本地服务、免密钥；需在 LM Studio 内先加载对应 embedding 模型。",
+    summary: "图形化本地服务、免密钥；需在 LM Studio 内先加载对应 embedding 模型。该模型维度固定 768。",
   },
   {
     key: "custom",

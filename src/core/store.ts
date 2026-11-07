@@ -94,7 +94,7 @@ const defaults: Config = {
   revision: 1,
   defaultLimit: 3,
   tokenBudget: 1200,
-  lexicalThreshold: 0.5,
+  lexicalThreshold: 0.2,
   semanticThreshold: 0.65,
   similarityThreshold: 0.92,
   similarityBuildThreshold: 0.55,
@@ -2830,7 +2830,7 @@ export class Store {
         relevance <
         (mode === "semantic"
           ? config.semanticThreshold
-          : Math.min(config.lexicalThreshold, 0.2))
+          : config.lexicalThreshold)
       )
         continue;
       // all() 已按 config 计算 m.weight，这里不再重复 weight()（O-19）。
@@ -2862,28 +2862,42 @@ export class Store {
         }
       }
     }
-    // 综合排序：相关度仍为主，重要度做 0.5~1.0 的乘性加权，时间作为可配置
-    // 半衰期的乘性衰减（task 类短半衰期，profile/decision 长半衰期）。
-    const HALF_LIFE: Record<string, number> = {
-      task: 14,
-      decision: 365,
-      profile: 730,
-      person: 365,
-      preference: 365,
-      lesson: 365,
-      concept: 365,
-      persona: 365,
+    // 综合排序：内容相关度为主，重要性/频率/新近度按配置权重做 0.6~1.0 的乘性调制。
+    // 类型系数只缩放「半衰期天数」这一件事，全局速度仍由 config.halfLifeDays 控制，
+    // 因此设置页的三个权重与半衰期、频率饱和值都会真实改变返回顺序（v0.5.2）。
+    const TYPE_HALF_LIFE: Record<string, number> = {
+      task: 0.08,
+      decision: 2,
+      profile: 4,
+      person: 2,
+      preference: 2,
+      lesson: 2,
+      concept: 2,
+      persona: 2,
+      fact: 2,
+      project: 2,
     };
     const rank = (m: SearchItem) => {
       const days = Math.max(0, now - m.confirmed_at) / 86400000;
-      const halfLife = HALF_LIFE[m.type] ?? 180;
+      const halfLife = Math.max(
+        1,
+        config.halfLifeDays * (TYPE_HALF_LIFE[m.type] ?? 2),
+      );
       const recency = 2 ** (-days / halfLife);
-      const importance = 0.8 + (0.2 * Math.max(0, Math.min(99, m.importance))) / 99;
+      const importance = Math.max(0, Math.min(99, m.importance)) / 99;
+      const frequency = Math.min(
+        Math.log1p(Number(m.retrieval_count)) /
+          Math.log1p(Math.max(2, config.frequencyCap)),
+        1,
+      );
+      const quality =
+        config.importanceFactor * importance +
+        config.frequencyFactor * frequency +
+        config.recencyFactor * recency;
       return (
         (0.9 * (rawScore.get(m.id) ?? 0) +
           0.1 * (titleScore.get(m.id) ?? 0)) *
-        importance *
-        recency
+        (0.6 + 0.4 * quality)
       );
     };
     scored.sort(
@@ -3247,17 +3261,39 @@ export class Store {
     ] as const)
       check(Number.isInteger(config[k]));
     check(
-      config.defaultLimit >= 1 &&
-        config.defaultLimit <= 5 &&
-        config.tokenBudget >= 128 &&
-        config.tokenBudget <= 1200 &&
-        config.halfLifeDays > 0 &&
-        config.frequencyCap >= 1 &&
-        config.protectedImportance >= 1 &&
-        config.protectedImportance <= 99 &&
-        config.minArchivedDays >= 30 &&
-        config.embeddingDimension >= 0 &&
-        config.embeddingDimension <= 8192,
+      config.defaultLimit >= 1 && config.defaultLimit <= 5,
+      "VALIDATION_ERROR",
+      "「每次带回几条」需在 1～5 之间。",
+    );
+    check(
+      config.tokenBudget >= 128 && config.tokenBudget <= 1200,
+      "VALIDATION_ERROR",
+      "「最多带回多少内容」需在 128～1200 字节之间。",
+    );
+    check(
+      config.halfLifeDays > 0,
+      "VALIDATION_ERROR",
+      "「旧记忆淡出速度」必须大于 0 天。",
+    );
+    check(
+      config.frequencyCap >= 1,
+      "VALIDATION_ERROR",
+      "「频率饱和值」必须不小于 1。",
+    );
+    check(
+      config.protectedImportance >= 1 && config.protectedImportance <= 99,
+      "VALIDATION_ERROR",
+      "「受保护的重要程度」需在 1～99 之间。",
+    );
+    check(
+      config.minArchivedDays >= 30,
+      "VALIDATION_ERROR",
+      "「永久清除前保留天数」不得小于 30 天。",
+    );
+    check(
+      config.embeddingDimension >= 0 && config.embeddingDimension <= 8192,
+      "VALIDATION_ERROR",
+      "「向量维度」需在 1～8192 之间。",
     );
     for (const k of [
       "similarityBuildThreshold",

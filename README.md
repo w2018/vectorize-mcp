@@ -57,23 +57,26 @@ Windows 与 Linux 行为一致：初始化只在本机保存 scrypt 哈希；已
 | `DATA_DIR` | 数据目录，默认 `data`，建议使用固定绝对路径 |
 | `ADMIN_PASSWORD` | 仅用于 `npm run init-admin` |
 | `EMBEDDING_BASE_URL` / `EMBEDDING_MODEL` / `EMBEDDING_DIMENSION` | 可选编码器，**三项必须同时设置或全部省略**；只设一部分会被配置校验拒绝 |
-| `EMBEDDING_API_KEY` | 可选服务端编码器密钥，不通过后台返回（Web 界面不接收也不展示） |
+| `EMBEDDING_API_KEY` | 可选的编码器密钥兜底来源；界面保存的密钥优先（见下）。两者都不会被接口回显 |
 
 ### 向量编码器（语义检索）
 
 「设置 → 高级设置 → 向量编码器」提供预设下拉，选中后自动填入三项：
 
-| 预设 | baseUrl | model | 维度 | 是否需要 Key |
-| --- | --- | --- | --- | --- |
-| OpenAI 官方 | `https://api.openai.com/v1` | `text-embedding-3-small` | 1536 | 是 |
-| 阿里云百炼 DashScope | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `text-embedding-v3` | 1024 | 是 |
-| 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | `embedding-3` | 2048 | 是 |
-| 本地 Ollama | `http://127.0.0.1:11434/v1` | `nomic-embed-text` | 768 | 否 |
-| 本地 LM Studio | `http://127.0.0.1:1234/v1` | `text-embedding-nomic-embed-text-v1.5` | 768 | 否 |
+| 预设 | baseUrl | model | 默认维度 | 可调维度 | 是否需要 Key |
+| --- | --- | --- | --- | --- | --- |
+| OpenAI 官方 | `https://api.openai.com/v1` | `text-embedding-3-small` | 1536 | 1536 / 1024 / 512 | 是 |
+| 阿里云百炼 DashScope | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `text-embedding-v3` | 1024 | 1024 / 768 / 512 | 是 |
+| 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | `embedding-3` | 2048 | 256 ～ 2048 | 是 |
+| 本地 Ollama | `http://127.0.0.1:11434/v1` | `nomic-embed-text` | 768 | 固定 768 | 否 |
+| 本地 LM Studio | `http://127.0.0.1:1234/v1` | `text-embedding-nomic-embed-text-v1.5` | 768 | 固定 768 | 否 |
 
-- **baseUrl 填到 `/v1` 这一层**，程序自动追加 `/embeddings`；写成 `.../v1/embeddings` 会 404。
-- **维度必须是模型真实输出维度**，填错会让每条记忆编码失败并退回词法检索。
-- **保存前先点「测试连接」**：它用草稿配置真实请求一次，不写库、不切换当前配置，返回实际维度、耗时或具体失败原因（地址非法 / 401 鉴权 / 维度不匹配 / 超时）。
+- **baseUrl 填到 `/v1` 这一层**，程序自动追加 `/embeddings`（拉取模型时追加 `/models`）；写成 `.../v1/embeddings` 会 404。
+- **维度可留空**：点「测试连接」会读回服务真实输出的维度并自动填入表单；维度写错时测试会明确提示「服务实际返回 N 维」。请求体会带 `dimensions` 字段，服务不支持时自动退回默认维度重试一次。
+- **维度怎么选**：每条记忆向量占 `4 字节 × 维度`，检索是逐条比对、没有 ANN 索引，所以维度直接决定存储与扫描耗时。5000 条记忆下 2048 维约 41 MB、1024 维约 20 MB；精度足够时优先 1024（或中文场景 768）。
+- **API Key 可在界面填写**：加密后落在 `<DATA_DIR>/embedding-secret.json`，密钥文件 `embedding-secret.key` 独立保存（0600）。接口只返回 `has_key` / `source`（`file` | `env`），永不回显明文；留空保存表示保持现状，只有「清除密钥」才删除。优先级：加密文件 > 环境变量 `EMBEDDING_API_KEY`。
+- **模型名可以从服务拉取**：点「拉取模型」调用 `GET {baseUrl}/models`，从下拉里选，避免手打错名字导致 `model mismatch`。
+- **保存前先点「测试连接」**：用草稿配置真实请求一次，不写库、不切换当前配置，返回实际维度、耗时或具体失败原因（地址非法 / 401 鉴权 / 维度不匹配 / 超时）。
 - 三项全部留空表示不使用语义检索；配置有值但不完整会在保存阶段直接拒绝，不再出现「配置写错导致每次检索 500」。
 - 编码器运行期失败（网络中断、Key 失效）不会丢记忆，只降级为词法检索，并在响应 `warnings` 中给出原因。
 

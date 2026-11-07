@@ -15,6 +15,7 @@ import {
 } from "../embedding/openai.js";
 import { toolSchemas, type ToolName } from "../mcp/schemas.js";
 import type { McpService } from "../mcp/http.js";
+import { EmbeddingSecret } from "./embedding-secret.js";
 
 export interface EmbeddingProvider {
   readonly descriptor: EmbeddingDescriptor;
@@ -35,6 +36,8 @@ const codeOf = (error: unknown): unknown =>
 
 /** Domain orchestration only: encoders never run inside SQLite transactions. */
 export class MemoryService implements McpService<Context> {
+  /** 供测试注入的 fetch；生产走全局 fetch。 */
+  fetchImpl?: typeof fetch;
   private reindexCursor = "";
   private reindexRunning = false;
   private adapterCache?: { key: string; provider: EmbeddingProvider };
@@ -42,7 +45,33 @@ export class MemoryService implements McpService<Context> {
     private readonly database: ServiceDatabase,
     private readonly fallback: EmbeddingProvider | null = null,
     private readonly env: NodeJS.ProcessEnv = process.env,
+    private readonly secret: EmbeddingSecret | null = null,
   ) {}
+  /** 生效中的 Key：界面保存的加密文件优先，其次是环境变量。 */
+  private apiKey(): string {
+    if (this.secret) {
+      const { apiKey } = this.secret.resolve();
+      if (apiKey) return apiKey;
+    }
+    return (this.env.EMBEDDING_API_KEY ?? "").trim();
+  }
+  keyStatus() {
+    if (this.secret) {
+      const status = this.secret.status();
+      if (!status.has_key && this.env.EMBEDDING_API_KEY) {
+        return { has_key: true, source: "env" as const };
+      }
+      return status;
+    }
+    const fromEnv = Boolean(this.env.EMBEDDING_API_KEY);
+    return { has_key: fromEnv, source: fromEnv ? ("env" as const) : ("none" as const) };
+  }
+  saveKey(apiKey: string) {
+    if (!this.secret) throw new DomainError("FEATURE_DISABLED");
+    this.secret.save(apiKey);
+    this.adapterCache = undefined;
+    return this.keyStatus();
+  }
   async effectiveEmbeddingConfig(): Promise<{
     enabled: boolean;
     baseUrl: string;
@@ -113,7 +142,7 @@ export class MemoryService implements McpService<Context> {
         config.version +
         ":endpoint:" +
         createHash("sha256").update(config.baseUrl).digest("hex"),
-      apiKey: this.env.EMBEDDING_API_KEY,
+      apiKey: this.apiKey() || undefined,
       timeoutMs: Number(this.env.EMBEDDING_TIMEOUT_MS ?? 15000),
       concurrency: Number(this.env.EMBEDDING_CONCURRENCY ?? 4),
       maxQueue: Number(this.env.EMBEDDING_MAX_QUEUE ?? 64),
@@ -439,57 +468,175 @@ export class MemoryService implements McpService<Context> {
   }
   /**
    * 用给定配置（通常是设置页尚未发布的草稿）真实调用一次编码服务。
-   * 不写数据库、不改动当前配置，因此可以在预览之前验证三项是否互相匹配；
-   * 失败时返回可读原因，而不是让用户去猜「为什么检索还是词法」。
+   * 不写数据库、不改动当前配置；维度可留空，此时由服务端返回的向量长度确定真实维度，
+   * 避免「维度填错 → 每条记忆编码失败 → 检索永远退回词法」。
    */
   async testEncoder(input: {
     baseUrl: string;
     model: string;
-    dimension: number;
+    dimension?: number;
+    apiKey?: string;
   }): Promise<{
     ok: boolean;
     model: string;
     dimension: number;
+    declared_dimension: number;
+    dimension_matched: boolean;
     elapsed_ms: number;
     error?: string;
   }> {
     const started = Date.now();
-    const base = { model: input.model, dimension: input.dimension };
-    let provider: EmbeddingProvider;
-    try {
-      provider = new OpenAIEmbedding({
-        baseUrl: input.baseUrl,
-        model: input.model,
-        dimension: input.dimension,
-        apiKey: this.env.EMBEDDING_API_KEY,
-        timeoutMs: Number(this.env.EMBEDDING_TIMEOUT_MS ?? 15000),
-        concurrency: 1,
-        maxQueue: 0,
-      });
-    } catch (error) {
+    const declared = input.dimension ?? 0;
+    const probe = await this.probeEmbedding({
+      baseUrl: input.baseUrl,
+      model: input.model,
+      dimension: declared > 0 ? declared : undefined,
+      apiKey: input.apiKey?.trim() || this.apiKey() || undefined,
+    });
+    if (!probe.ok)
       return {
         ok: false,
-        ...base,
+        model: input.model,
         dimension: 0,
+        declared_dimension: declared,
+        dimension_matched: declared > 0,
         elapsed_ms: Date.now() - started,
-        error: this.readableEncoderError(error),
+        error: probe.error,
       };
+    return {
+      ok: declared === 0 || declared === probe.dimension,
+      model: probe.model,
+      dimension: probe.dimension,
+      declared_dimension: declared,
+      dimension_matched: declared === 0 || declared === probe.dimension,
+      elapsed_ms: Date.now() - started,
+      error:
+        declared > 0 && declared !== probe.dimension
+          ? "服务实际返回 " +
+            probe.dimension +
+            " 维，与填写的 " +
+            declared +
+            " 维不一致；请把向量维度改为 " +
+            probe.dimension +
+            " 后保存。"
+          : undefined,
+    };
+  }
+  /** 直接打 /embeddings 探测真实维度；不经过适配器的维度强校验。 */
+  private async probeEmbedding(input: {
+    baseUrl: string;
+    model: string;
+    dimension?: number;
+    apiKey?: string;
+  }): Promise<
+    { ok: true; model: string; dimension: number } | { ok: false; error: string }
+  > {
+    let endpoint: URL;
+    try {
+      const url = new URL(input.baseUrl);
+      if (!["http:", "https:"].includes(url.protocol)) throw new Error("Invalid URL");
+      url.pathname = url.pathname.replace(/\/$/, "") + "/embeddings";
+      endpoint = url;
+    } catch {
+      return { ok: false, error: "服务地址不是合法的 http(s) 地址，或缺少 /v1 前缀。" };
     }
     try {
-      const vector = await provider.embed("向量编码器连通性测试");
+      const send = (withDimensions: boolean) =>
+        (this.fetchImpl ?? fetch)(endpoint, {
+          method: "POST",
+          redirect: "error",
+          signal: AbortSignal.timeout(
+            Number(this.env.EMBEDDING_TIMEOUT_MS ?? 15000),
+          ),
+          headers: {
+            "Content-Type": "application/json",
+            ...(input.apiKey ? { Authorization: "Bearer " + input.apiKey } : {}),
+          },
+          body: JSON.stringify({
+            model: input.model,
+            input: "向量编码器连通性测试",
+            encoding_format: "float",
+            ...(withDimensions && input.dimension ? { dimensions: input.dimension } : {}),
+          }),
+        });
+      let response = await send(Boolean(input.dimension));
+      // 不支持 dimensions 的服务回 400/422：退回默认维度重试，让用户看到真实维度。
+      if (input.dimension && (response.status === 400 || response.status === 422))
+        response = await send(false);
+      if (!response.ok) {
+        const detail =
+          response.status === 401 || response.status === 403
+            ? "鉴权失败：API Key 无效或未设置。"
+            : response.status === 404
+              ? "接口不存在：确认地址是 OpenAI 兼容基址，且不要包含 /embeddings 后缀。"
+              : "服务拒绝请求（HTTP " + response.status + "）。";
+        return { ok: false, error: detail };
+      }
+      const payload: unknown = await response.json();
+      const data =
+        payload && typeof payload === "object"
+          ? (payload as { data?: Array<{ embedding?: unknown }>; model?: unknown })
+          : {};
+      const vector = data.data?.[0]?.embedding;
+      if (!Array.isArray(vector) || vector.length < 1)
+        return { ok: false, error: "服务返回内容不是合法向量，无法确认维度。" };
       return {
         ok: true,
-        model: provider.descriptor.model,
+        model: typeof data.model === "string" ? data.model : input.model,
         dimension: vector.length,
-        elapsed_ms: Date.now() - started,
       };
     } catch (error) {
-      return {
-        ok: false,
-        ...base,
-        elapsed_ms: Date.now() - started,
-        error: this.readableEncoderError(error),
-      };
+      return { ok: false, error: this.readableEncoderError(error) };
+    }
+  }
+  /** 拉取该服务提供的模型列表（OpenAI 兼容 GET /models）。 */
+  async listModels(input: {
+    baseUrl: string;
+    apiKey?: string;
+  }): Promise<{ ok: boolean; models: string[]; error?: string }> {
+    let endpoint: URL;
+    try {
+      const url = new URL(input.baseUrl);
+      if (!["http:", "https:"].includes(url.protocol)) throw new Error("Invalid URL");
+      url.pathname = url.pathname.replace(/\/$/, "") + "/models";
+      endpoint = url;
+    } catch {
+      return { ok: false, models: [], error: "服务地址不是合法的 http(s) 地址。" };
+    }
+    try {
+      const response = await (this.fetchImpl ?? fetch)(endpoint, {
+        method: "GET",
+        redirect: "error",
+        signal: AbortSignal.timeout(Number(this.env.EMBEDDING_TIMEOUT_MS ?? 15000)),
+        headers: {
+          ...(input.apiKey?.trim()
+            ? { Authorization: "Bearer " + input.apiKey.trim() }
+            : this.apiKey()
+              ? { Authorization: "Bearer " + this.apiKey() }
+              : {}),
+        },
+      });
+      if (!response.ok)
+        return {
+          ok: false,
+          models: [],
+          error:
+            response.status === 401 || response.status === 403
+              ? "鉴权失败：API Key 无效或未设置。"
+              : "服务不支持 /models（HTTP " + response.status + "），请手动填写模型名。",
+        };
+      const payload: unknown = await response.json();
+      const rows =
+        payload && typeof payload === "object" && Array.isArray((payload as { data?: unknown }).data)
+          ? ((payload as { data: Array<{ id?: unknown }> }).data)
+          : [];
+      const models = rows
+        .map((row) => (typeof row?.id === "string" ? row.id : ""))
+        .filter((id) => Boolean(id))
+        .sort();
+      return { ok: true, models };
+    } catch (error) {
+      return { ok: false, models: [], error: this.readableEncoderError(error) };
     }
   }
   private readableEncoderError(error: unknown): string {
