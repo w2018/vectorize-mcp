@@ -20,10 +20,6 @@ import { tmpdir } from "node:os";
 import { WebdavCloud } from "./webdav.js";
 import { APP_VERSION } from "./version.js";
 import { hashPassword } from "./password.js";
-import {
-  ENCODER_PRESETS,
-  matchEncoderPreset,
-} from "../core/embedding-presets.js";
 import type { DatabasePool } from "./database.js";
 import { BOT_PRESETS } from "../core/catalog.js";
 import {
@@ -151,43 +147,31 @@ export async function registerAdmin(
     passwordFile?: string;
     /** 安装根目录（源码与 dist 所在），在线更新会在此目录内覆盖程序文件。 */
     updateRoot?: string;
-    /** 编码器连通性测试复用服务的编码适配器；缺省时该路由返回 FEATURE_DISABLED。 */
-    testEncoder?: (input: {
+    /** 通用对话模型连通性测试；缺省时该路由返回 FEATURE_DISABLED。 */
+    testModel?: (input: {
       baseUrl: string;
       model: string;
-      dimension?: number;
       apiKey?: string;
-    }) => Promise<{
-      ok: boolean;
-      model: string;
-      dimension: number;
-      declared_dimension: number;
-      dimension_matched: boolean;
-      elapsed_ms: number;
-      error?: string;
-    }>;
-    /** 拉取编码服务的模型列表（GET {baseUrl}/models）。 */
+    }) => Promise<{ ok: boolean; model: string; elapsed_ms: number; error?: string }>;
+    /** 拉取模型服务的模型列表（GET {baseUrl}/models）。 */
     listEncoderModels?: (input: {
       baseUrl: string;
       apiKey?: string;
-      probe?: boolean;
-    }) => Promise<{
-      ok: boolean;
-      models: string[];
-      embeddable?: string[];
-      error?: string;
-    }>;
+    }) => Promise<{ ok: boolean; models: string[]; error?: string }>;
     /** 只返回 has_key / source，绝不回显明文。 */
     keyStatus?: () => { has_key: boolean; source: "file" | "env" | "none" };
     /** 保存或清除界面输入的 API Key（空串=清除）。 */
     saveKey?: (
       apiKey: string,
     ) => { has_key: boolean; source: "file" | "env" | "none" };
-    /** 重建相似关系前批量补齐向量（语义/混合依据需要）。 */
-    ensureVectors?: () => Promise<{
-      attempted: number;
-      stored: number;
-      failed: number;
+    /** 用通用对话模型判断相似关系并重建（basis=llm）。 */
+    rebuildSimilarityWithModel?: (subjectId: string) => Promise<{
+      memories: number;
+      candidates: number;
+      judged: number;
+      similar: number;
+      truncated: boolean;
+      basis: "llm";
     }>;
   },
 ): Promise<void> {
@@ -639,38 +623,34 @@ export async function registerAdmin(
   );
   route("POST", "/maintenance/similarity", async (req) => {
     const b = body(req);
+    const subjectId = subject(b);
+    let basis: "lexical" | "llm";
+    if (b.basis === undefined || b.basis === "") {
+      const cfg = await read<{ similarityBasis?: string }>("getConfig");
+      basis = cfg.similarityBasis === "llm" ? "llm" : "lexical";
+    } else if (b.basis === "lexical" || b.basis === "llm") {
+      basis = b.basis;
+    } else {
+      throw new DomainError("VALIDATION_ERROR", "相似关系依据只能是 lexical（词法）或 llm（通用模型）。");
+    }
+    if (basis === "llm") {
+      if (!options.rebuildSimilarityWithModel) throw new DomainError("FEATURE_DISABLED");
+      const rebuilt = await options.rebuildSimilarityWithModel(subjectId);
+      return { ...rebuilt, basis: "llm" as const };
+    }
     let threshold: number | undefined;
     if (b.threshold !== undefined && b.threshold !== "") {
       threshold = Number(b.threshold);
       if (!Number.isFinite(threshold) || threshold < 0.3 || threshold > 0.95)
         throw new DomainError("VALIDATION_ERROR");
     }
-    let basis: "lexical" | "semantic" | "hybrid" | undefined;
-    if (b.basis !== undefined && b.basis !== "") {
-      if (b.basis !== "lexical" && b.basis !== "semantic" && b.basis !== "hybrid")
-        throw new DomainError("VALIDATION_ERROR", "相似关系依据只能是 lexical / semantic / hybrid。");
-      basis = b.basis;
-    }
-    // 语义/混合依据必须有向量：先批量补齐，再重建；没有可用编码器时明确报错，
-    // 避免用户看到「重建成功」但实际只算出零条关系。
-    let effectiveBasis = basis;
-    if (!effectiveBasis) {
-      const cfg = await read<{ similarityBasis?: string }>("getConfig");
-      effectiveBasis =
-        (cfg.similarityBasis as "lexical" | "semantic" | "hybrid") ?? "lexical";
-    }
-    let vectors: { attempted: number; stored: number; failed: number } | undefined;
-    if (effectiveBasis !== "lexical") {
-      if (!options.ensureVectors) throw new DomainError("FEATURE_DISABLED");
-      vectors = await options.ensureVectors();
-    }
-    const rebuilt = (await write("rebuildSimilarity", subject(b), {
+    const rebuilt = (await write("rebuildSimilarity", subjectId, {
       threshold,
-      basis,
+      basis: "lexical" as const,
       neighbors:
         b.neighbors === undefined ? undefined : integer(b.neighbors, 5, 20),
     })) as Record<string, unknown>;
-    return { ...rebuilt, basis: effectiveBasis, vectors };
+    return { ...rebuilt, basis: "lexical" as const };
   });
   for (const path of ["/memories", "/profiles"])
     route("GET", path, async (req) => {
@@ -817,27 +797,17 @@ export async function registerAdmin(
     return paged(items, q);
   });
   route("GET", "/config", async () => read("getConfig"));
-  // 编码器预设目录：设置页下拉与「每个参数的用法」文案的唯一来源。
-  route("GET", "/config/embedding-presets", async () => ({
-    items: ENCODER_PRESETS,
-    active:
-      matchEncoderPreset(
-        await read<{
-          embeddingBaseUrl?: string;
-          embeddingModel?: string;
-          embeddingDimension?: number;
-        }>("getConfig"),
-      )?.key ?? "custom",
-    key_from_env: Boolean(process.env.EMBEDDING_API_KEY),
+  // 通用模型设置的元信息：密钥是否已配置（从不回显明文）。
+  route("GET", "/config/model-settings", async () => ({
     key: options.keyStatus
       ? options.keyStatus()
       : {
           has_key: Boolean(process.env.EMBEDDING_API_KEY),
-          source: process.env.EMBEDDING_API_KEY ? "env" : "none",
+          source: process.env.EMBEDDING_API_KEY ? ("env" as const) : ("none" as const),
         },
     can_store_key: Boolean(options.saveKey),
   }));
-  // 保存/清除编码器 Key：界面输入 → 加密落盘，返回值只有状态，不回显明文。
+  // 保存/清除模型服务密钥：界面输入 → 加密落盘，返回值只有状态，不回显明文。
   route("POST", "/config/embedding-key", async (req) => {
     if (!options.saveKey) throw new DomainError("FEATURE_DISABLED");
     const b = body(req);
@@ -857,9 +827,7 @@ export async function registerAdmin(
       typeof b.api_key === "string" && b.api_key.trim()
         ? b.api_key.trim()
         : undefined;
-    // probe=true 时逐个真打 /embeddings，把「列表里有但不是向量模型」的项筛出来，
-    // 避免用户选到聊天模型后测试连接必然失败。
-    return options.listEncoderModels({ baseUrl, apiKey, probe: b.probe === true });
+    return options.listEncoderModels({ baseUrl, apiKey });
   });
   route("POST", "/config/preview", async (req) => {
     const b = body(req),
@@ -868,33 +836,18 @@ export async function registerAdmin(
       throw new DomainError("REVISION_CONFLICT");
     return write("previewConfig", object(b.patch));
   });
-  // 设置页「测试连接」：只验证，不落库、不切换当前配置。
+  // 设置页「测试连接」：用草稿配置真实发一条对话，只验证不落库。
   route("POST", "/config/embedding-test", async (req) => {
-    if (!options.testEncoder) throw new DomainError("FEATURE_DISABLED");
+    if (!options.testModel) throw new DomainError("FEATURE_DISABLED");
     const b = body(req);
     const baseUrl = text(b.baseUrl).trim();
     const model = text(b.model).trim();
-    const dimension = Number(b.dimension);
     if (!baseUrl || !model) throw new DomainError("VALIDATION_ERROR");
-    // 维度可留空：由服务端返回的向量长度确定真实维度，供界面一键回填。
-    if (
-      b.dimension !== undefined &&
-      b.dimension !== null &&
-      b.dimension !== ""
-    ) {
-      if (!Number.isSafeInteger(dimension) || dimension < 1 || dimension > 8192)
-        throw new DomainError("VALIDATION_ERROR");
-    }
     const apiKey =
       typeof b.api_key === "string" && b.api_key.trim()
         ? b.api_key.trim()
         : undefined;
-    return options.testEncoder({
-      baseUrl,
-      model,
-      dimension: Number.isSafeInteger(dimension) && dimension > 0 ? dimension : undefined,
-      apiKey,
-    });
+    return options.testModel({ baseUrl, model, apiKey });
   });
   route("PATCH", "/config", async (req) => {
     const b = body(req);

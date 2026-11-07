@@ -159,8 +159,8 @@ export interface Config {
   similarityThreshold: number;
   similarityBuildThreshold: number;
   similarityFoldThreshold: number;
-  /** 重建相似关系时使用的依据：词法 bigram / 向量余弦 / 两者取高。 */
-  similarityBasis: "lexical" | "semantic" | "hybrid";
+  /** 重建相似关系时使用的依据：词法 bigram / 通用大模型判断。 */
+  similarityBasis: "lexical" | "semantic" | "hybrid" | "llm";
   /** 向量余弦阈值（仅 similarityBasis 含 semantic 时生效），与词法 Jaccard 阈值分开。 */
   similaritySemanticThreshold: number;
   importanceFactor: number;
@@ -178,6 +178,9 @@ export interface Config {
   embeddingModel: string;
   embeddingBaseUrl: string;
   embeddingDimension: number;
+  /** 通用对话模型（用于「记忆整理」判断相似关系），与向量无关。 */
+  llmBaseUrl: string;
+  llmModel: string;
 }
 export interface Memory extends Required<Omit<MemoryFields, "profile">> {
   id: string;

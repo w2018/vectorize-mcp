@@ -842,40 +842,35 @@ export function Suggestions({
   const [merge, setMerge] = useState<Suggestion | null>(null);
   const [rebuilding, setRebuilding] = useState(false);
   const [rebuildResult, setRebuildResult] = useState("");
-  // 重建依据：词法认字面、语义认同义（换说法也能关联），hybrid 取两者较高者。
-  const [basis, setBasis] = useState<"lexical" | "semantic" | "hybrid">(
-    "semantic",
-  );
+  // 重建依据：词法认字面；通用模型判断两条记忆是否讲同一件事。
+  const [basis, setBasis] = useState<"lexical" | "llm">("llm");
   return (
     <>
       <Heading
         eyebrow="MEMORY CARE"
         title="记忆整理"
-        description="配置向量编码器并重建相似关系，再逐条处理过期、低权重和冲突的记忆。系统不会自动删除。"
+        description="配置通用模型并重建相似关系，再逐条处理过期、低权重和冲突的记忆。系统不会自动删除。"
       />
       <Feedback error={action.error} notice={action.notice} />
       <section className="panel padded">
-        <h2>向量编码器</h2>
+        <h2>模型设置</h2>
         <p className="muted">
-          编码器只用于下面的「重建相似关系」，不改变检索方式——检索始终按词法匹配。未配置时只能按词法重建。
+          通用模型只用于下面的「重建相似关系」，不改变检索方式——检索始终按词法匹配。未配置时只能按词法重建。
         </p>
         <EncoderConfigCard />
       </section>
       <section className="panel padded">
         <h2>重建相似关系</h2>
         <p className="muted">
-          扫描当前账户全部记忆，按所选依据重新生成自动相似关系，用于检索时折叠高度相似记忆。语义/混合依据会先补齐向量，可能需要一段时间。不会修改或删除手动关系链。
+          扫描当前账户全部记忆，按所选依据重新生成自动相似关系，用于检索时折叠高度相似记忆。通用模型依据会把候选记忆的正文发送到模型服务判断，可能需要一段时间。不会修改或删除手动关系链。
         </p>
         <div className="maintenance-row">
           <select
             value={basis}
-            onChange={(e) =>
-              setBasis(e.target.value as "lexical" | "semantic" | "hybrid")
-            }
+            onChange={(e) => setBasis(e.target.value as "lexical" | "llm")}
             aria-label="相似关系依据"
           >
-            <option value="semantic">语义（按向量，识别换了说法的同义记忆）</option>
-            <option value="hybrid">混合（词法与语义取较高者）</option>
+            <option value="llm">通用模型（判断两条记忆是否讲同一件事）</option>
             <option value="lexical">词法（按字面 bigram，快但认不出同义）</option>
           </select>
           <button
@@ -886,30 +881,29 @@ export function Suggestions({
               try {
                 const stats = await api<{
                   memories: number;
-                  pairs: number;
+                  candidates?: number;
+                  judged?: number;
+                  pairs?: number;
+                  similar?: number;
                   basis?: string;
-                  vectors?: { attempted: number; stored: number; failed: number };
                 }>("/maintenance/similarity", "POST", writeBody({
                   subject_id: subject,
                   neighbors: 5,
                   basis,
                 }));
-                const vectorNote = stats.vectors
-                  ? "（补齐向量 " +
-                    stats.vectors.stored +
-                    " 条" +
-                    (stats.vectors.failed ? "，" + stats.vectors.failed + " 条失败" : "") +
-                    "）"
-                  : "";
                 setRebuildResult(
                   "已按「" +
-                    (basis === "semantic" ? "语义" : basis === "hybrid" ? "混合" : "词法") +
+                    (basis === "llm" ? "通用模型" : "词法") +
                     "」扫描 " +
                     stats.memories +
-                    " 条记忆，关联 " +
-                    stats.pairs +
-                    " 对相似记忆" +
-                    vectorNote +
+                    " 条记忆，" +
+                    (basis === "llm"
+                      ? "判断 " +
+                        (stats.judged ?? 0) +
+                        " 对候选，关联 " +
+                        (stats.similar ?? 0) +
+                        " 对相似记忆"
+                      : "关联 " + (stats.pairs ?? 0) + " 对相似记忆") +
                     "。",
                 );
                 dataChanged();

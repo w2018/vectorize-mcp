@@ -117,6 +117,8 @@ const defaults: Config = {
   embeddingModel: "",
   embeddingBaseUrl: "",
   embeddingDimension: 0,
+  llmBaseUrl: "",
+  llmModel: "",
 };
 export function weight(
   m: Pick<Memory, "importance" | "retrieval_count" | "confirmed_at">,
@@ -179,6 +181,24 @@ export class Store {
     }
     if (!options.readonly) {
       this.db.exec(schema);
+      // v0.6.1：相似关系新增「通用模型判断」依据。旧库的 CHECK 约束只允许
+      // lexical/semantic/hybrid，需就地重建表（行数据原样保留），否则写入 basis=llm 会失败。
+      const similarSql = this.row(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_similarity'",
+      )?.sql;
+      if (
+        typeof similarSql === "string" &&
+        similarSql.includes("'lexical','semantic','hybrid'") &&
+        !similarSql.includes("'llm'")
+      ) {
+        this.db.exec(
+          "ALTER TABLE memory_similarity RENAME TO memory_similarity_legacy;" +
+            "CREATE TABLE memory_similarity(id TEXT PRIMARY KEY,subject_id TEXT NOT NULL REFERENCES subjects(id),source_id TEXT NOT NULL REFERENCES memories(id),target_id TEXT NOT NULL REFERENCES memories(id),similarity REAL NOT NULL CHECK(similarity BETWEEN 0 AND 1),basis TEXT NOT NULL CHECK(basis IN ('lexical','semantic','hybrid','llm')),algorithm_version TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'auto' CHECK(status IN ('auto','confirmed','rejected')),created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,CHECK(source_id<>target_id),UNIQUE(subject_id,source_id,target_id));" +
+            "INSERT INTO memory_similarity SELECT * FROM memory_similarity_legacy;" +
+            "DROP TABLE memory_similarity_legacy;",
+        );
+        this.db.exec(schema);
+      }
       const tokenColumns = this.rows(
         "PRAGMA table_info(tokens)",
       ) as unknown as { name: string }[];
@@ -2414,7 +2434,7 @@ export class Store {
     sourceId: string,
     targetId: string,
     similarity: number,
-    basis: "lexical" | "semantic" | "hybrid" = "lexical",
+    basis: "lexical" | "semantic" | "hybrid" | "llm" = "lexical",
     algorithmVersion = "lexical-bigram-v1",
   ) {
     const [a, b] = sourceId < targetId ? [sourceId, targetId] : [targetId, sourceId];
@@ -2611,6 +2631,101 @@ export class Store {
       pairs: pairTotal,
       basis: basisLabel,
     };
+  }
+  /**
+   * 为「通用大模型判断」生成候选对：先用词法 bigram 召回可能相关的一对对记忆，
+   * 再由 service 层把候选交给大模型判定。这里只做廉价召回，不产出最终关系。
+   */
+  similarityCandidates(
+    subjectId: string,
+    options: { threshold?: number; neighbors?: number; limit?: number } = {},
+  ): {
+    memories: number;
+    candidates: number;
+    truncated: boolean;
+    pairs: {
+      a: string;
+      b: string;
+      similarity: number;
+      aText: string;
+      bText: string;
+    }[];
+  } {
+    this.adminFor(subjectId);
+    const config = this.getConfig();
+    const threshold = options.threshold ?? Math.min(config.similarityBuildThreshold, 0.4);
+    const neighbors = Math.max(1, Math.min(10, options.neighbors ?? 5));
+    const limit = Math.max(1, Math.min(2000, options.limit ?? 400));
+    const memories = this.all(subjectId).filter((m) => this.effective(m));
+    const byId = new Map(memories.map((m) => [m.id, m]));
+    const features = new Map<string, Set<string>>();
+    for (const m of memories) features.set(m.id, this.featuresOf(m));
+    const df = new Map<string, number>();
+    for (const set of features.values())
+      for (const term of set) df.set(term, (df.get(term) ?? 0) + 1);
+    const postings = new Map<string, string[]>();
+    for (const [id, set] of features)
+      for (const term of set) {
+        const list = postings.get(term);
+        if (list) list.push(id);
+        else postings.set(term, [id]);
+      }
+    const pairCounts = new Map<string, number>();
+    for (const [id, set] of features) {
+      const terms = [...set]
+        .filter((term) => (df.get(term) ?? 0) >= 2)
+        .sort((a, b) => (df.get(a) ?? 0) - (df.get(b) ?? 0))
+        .slice(0, 12);
+      for (const term of terms)
+        for (const other of postings.get(term) ?? [])
+          if (other !== id) {
+            const key = id < other ? id + SEP + other : other + SEP + id;
+            pairCounts.set(key, (pairCounts.get(key) ?? 0) + 1);
+          }
+    }
+    const scored: { a: string; b: string; similarity: number }[] = [];
+    for (const [key, count] of pairCounts) {
+      if (count < 2) continue;
+      const [a, b] = key.split(SEP);
+      const similarity = Store.jaccard(features.get(a)!, features.get(b)!);
+      if (similarity >= threshold) scored.push({ a, b, similarity });
+    }
+    scored.sort((x, y) => y.similarity - x.similarity);
+    const truncated = scored.length > limit;
+    const pairs = scored.slice(0, limit).map((item) => ({
+      ...item,
+      aText: (byId.get(item.a)?.content ?? "").slice(0, 400),
+      bText: (byId.get(item.b)?.content ?? "").slice(0, 400),
+    }));
+    // neighbors 只用于限制每条的候选规模；这里按全局上限截断即可。
+    void neighbors;
+    return {
+      memories: memories.length,
+      candidates: scored.length,
+      truncated,
+      pairs,
+    };
+  }
+  /** 用大模型判定后的关系覆盖自动相似关系（basis=llm）。 */
+  applySimilarityPairs(
+    subjectId: string,
+    pairs: { a: string; b: string; similarity: number }[],
+    algorithmVersion = "similarity-llm-v1",
+  ) {
+    this.adminFor(subjectId);
+    this.tx(() => {
+      this.db
+        .prepare(
+          "DELETE FROM memory_similarity WHERE subject_id=? AND status='auto'",
+        )
+        .run(subjectId);
+      for (const item of pairs) {
+        const similarity = Math.max(0, Math.min(1, item.similarity));
+        this.saveSimilarity(subjectId, item.a, item.b, similarity, "llm", algorithmVersion);
+      }
+      return pairs.length;
+    });
+    return { pairs: pairs.length };
   }
   /** 读取某条记忆的相似关系（供 Web 详情展示），按相似度降序，最多 20 条。 */
   relatedSimilarity(subjectId: string, id: string) {
@@ -3429,7 +3544,7 @@ export class Store {
     ] as const)
       check(Number.isFinite(config[k]) && config[k] >= 0 && config[k] <= 1);
     check(config.similarityBuildThreshold>=0.3 && config.similarityBuildThreshold<=0.95 && config.similarityFoldThreshold>=0.5 && config.similarityFoldThreshold<=1);
-    check(["lexical","semantic","hybrid"].includes(config.similarityBasis));
+    check(["lexical","semantic","hybrid","llm"].includes(config.similarityBasis));
     check(
       config.similaritySemanticThreshold >= 0.5 && config.similaritySemanticThreshold <= 0.99,
       "VALIDATION_ERROR",
@@ -3486,6 +3601,33 @@ export class Store {
         config.embeddingDimension >= 1 && config.embeddingDimension <= 8192,
         "VALIDATION_ERROR",
         "向量维度必须在 1～8192 之间，且与模型真实输出一致。",
+      );
+    }
+    // 通用对话模型（记忆整理）：服务地址与模型名必须同时填写或同时留空。
+    this.text(config.llmModel, 0, 200);
+    this.text(config.llmBaseUrl, 0, 2048);
+    const llmAny = Boolean(config.llmBaseUrl.trim()) || Boolean(config.llmModel.trim());
+    if (llmAny) {
+      check(
+        Boolean(config.llmBaseUrl.trim()) && Boolean(config.llmModel.trim()),
+        "VALIDATION_ERROR",
+        "通用模型需同时填写服务地址与模型名；全部留空表示不启用模型整理。",
+      );
+      let llmUrl: URL | null = null;
+      try {
+        llmUrl = new URL(config.llmBaseUrl.trim());
+      } catch {
+        llmUrl = null;
+      }
+      check(
+        llmUrl !== null &&
+          (llmUrl.protocol === "http:" || llmUrl.protocol === "https:") &&
+          !llmUrl.username &&
+          !llmUrl.password &&
+          !llmUrl.search &&
+          !llmUrl.hash,
+        "VALIDATION_ERROR",
+        "通用模型服务地址必须是 http(s) 地址，不能带账号、查询串或锚点。",
       );
     }
     return config;

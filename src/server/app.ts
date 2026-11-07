@@ -227,11 +227,12 @@ export async function buildApp(options: AppOptions) {
       origin: options.origin,
       passwordFile: options.passwordFile,
       updateRoot: options.updateRoot,
-      testEncoder: (input) => service.testEncoder(input),
+      testModel: (input) => service.testModel(input),
       listEncoderModels: (input) => service.listModels(input),
       keyStatus: () => service.keyStatus(),
       saveKey: (apiKey) => service.saveKey(apiKey),
-      ensureVectors: () => service.ensureVectors(),
+      rebuildSimilarityWithModel: (subjectId) =>
+        service.rebuildSimilarityWithModel(subjectId),
     });
     app.get("/health", async () => ({ ok: true, version: APP_VERSION }));
     const webRoot = resolve(options.webRoot ?? "dist/web");

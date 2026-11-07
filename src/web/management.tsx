@@ -1513,24 +1513,13 @@ const fields: {
   {
     key: "similarityBasis",
     label: "相似关系依据",
-    help: "重建相似关系时用词法字面还是向量语义。语义能认出「换了说法」的同义记忆，但 5000 条约需 11 秒。",
-    defaultValue: "lexical",
+    help: "重建相似关系时用词法字面还是通用模型判断。通用模型能认出「换了说法」的同义记忆，但速度取决于模型服务。",
+    defaultValue: "llm",
     type: "select",
     options: [
+      { value: "llm", label: "通用模型（判断是否讲同一件事）" },
       { value: "lexical", label: "词法（字面 bigram，快，认不出同义）" },
-      { value: "semantic", label: "语义（向量余弦，认同义）" },
-      { value: "hybrid", label: "混合（两者取较高者）" },
     ],
-    advanced: true,
-  },
-  {
-    key: "similaritySemanticThreshold",
-    label: "向量相似度阈值",
-    help: "语义/混合模式下，余弦相似度达到此值才建立自动关系；0.5～0.99。",
-    min: 0.5,
-    max: 0.99,
-    step: 0.01,
-    defaultValue: "0.8",
     advanced: true,
   },
   {
@@ -1609,9 +1598,9 @@ export function Settings({ refresh }: { refresh: number }) {
         </div>
         {advanced && (
           <div className="notice">
-            <strong>检索与编码器</strong>
+            <strong>检索与模型整理</strong>
             <p>
-              检索始终按词法匹配，不受编码器影响。向量编码器已移到「记忆整理」页，只用于按语义重建相似关系。
+              检索始终按词法匹配。通用模型设置已移到「记忆整理」页，只用于判断并重建相似关系。
             </p>
             <p>
               这里的发布只改变规则与统计口径，发布成功即对新请求生效，无需重启。

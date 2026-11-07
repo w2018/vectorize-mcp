@@ -16,6 +16,7 @@ import {
 import { toolSchemas, type ToolName } from "../mcp/schemas.js";
 import type { McpService } from "../mcp/http.js";
 import { EmbeddingSecret } from "./embedding-secret.js";
+import { ChatModel } from "./llm.js";
 
 export interface EmbeddingProvider {
   readonly descriptor: EmbeddingDescriptor;
@@ -556,178 +557,60 @@ export class MemoryService implements McpService<Context> {
       vector,
     );
   }
-  /**
-   * 用给定配置（通常是设置页尚未发布的草稿）真实调用一次编码服务。
-   * 不写数据库、不改动当前配置；维度可留空，此时由服务端返回的向量长度确定真实维度，
-   * 避免「维度填错 → 每条记忆编码失败 → 检索永远退回词法」。
-   */
-  async testEncoder(input: {
+  /** 通用对话模型配置：只用于「记忆整理」，与向量编码无关。 */
+  async effectiveModelConfig(): Promise<{
+    enabled: boolean;
     baseUrl: string;
     model: string;
-    dimension?: number;
-    apiKey?: string;
-  }): Promise<{
-    ok: boolean;
-    model: string;
-    dimension: number;
-    declared_dimension: number;
-    dimension_matched: boolean;
-    elapsed_ms: number;
-    error?: string;
   }> {
-    const started = Date.now();
-    const declared = input.dimension ?? 0;
-    const probe = await this.probeEmbedding({
-      baseUrl: input.baseUrl,
-      model: input.model,
-      dimension: declared > 0 ? declared : undefined,
-      apiKey: input.apiKey?.trim() || this.apiKey() || undefined,
+    const config = await this.database.read<Config>("model-config", "getConfig");
+    const baseUrl = (config?.llmBaseUrl ?? "").trim() || (this.env.EMBEDDING_BASE_URL ?? "");
+    const model = (config?.llmModel ?? "").trim() || (this.env.EMBEDDING_MODEL ?? "");
+    return { enabled: Boolean(baseUrl && model), baseUrl, model };
+  }
+  private chatModel(baseUrl: string, model: string, apiKey?: string): ChatModel {
+    return new ChatModel({
+      baseUrl,
+      model,
+      apiKey: apiKey?.trim() || this.apiKey() || undefined,
+      timeoutMs: Number(this.env.EMBEDDING_TIMEOUT_MS ?? 60000),
     });
-    if (!probe.ok)
+  }
+  /** 设置页「测试连接」：用草稿配置真实发一条 chat，验证地址、模型名与密钥。 */
+  async testModel(input: {
+    baseUrl: string;
+    model: string;
+    apiKey?: string;
+  }): Promise<{ ok: boolean; model: string; elapsed_ms: number; error?: string }> {
+    const started = Date.now();
+    try {
+      const model = this.chatModel(input.baseUrl, input.model, input.apiKey);
+      const reply = await model.chat(
+        [{ role: "user", content: "请只回复两个字：正常" }],
+        256,
+      );
+      return {
+        ok: true,
+        model: input.model,
+        elapsed_ms: Date.now() - started,
+      };
+    } catch (error) {
       return {
         ok: false,
         model: input.model,
-        dimension: 0,
-        declared_dimension: declared,
-        dimension_matched: declared > 0,
         elapsed_ms: Date.now() - started,
-        error: probe.error,
+        error: this.readableModelError(error),
       };
-    return {
-      ok: declared === 0 || declared === probe.dimension,
-      model: probe.model,
-      dimension: probe.dimension,
-      declared_dimension: declared,
-      dimension_matched: declared === 0 || declared === probe.dimension,
-      elapsed_ms: Date.now() - started,
-      error:
-        declared > 0 && declared !== probe.dimension
-          ? "服务实际返回 " +
-            probe.dimension +
-            " 维，与填写的 " +
-            declared +
-            " 维不一致；请把向量维度改为 " +
-            probe.dimension +
-            " 后保存。"
-          : undefined,
-    };
-  }
-  /** 直接打 /embeddings 探测真实维度；不经过适配器的维度强校验。 */
-  private async probeEmbedding(input: {
-    baseUrl: string;
-    model: string;
-    dimension?: number;
-    apiKey?: string;
-  }): Promise<
-    { ok: true; model: string; dimension: number } | { ok: false; error: string }
-  > {
-    let endpoint: URL;
-    try {
-      const url = new URL(input.baseUrl);
-      if (!["http:", "https:"].includes(url.protocol)) throw new Error("Invalid URL");
-      url.pathname = url.pathname.replace(/\/$/, "") + "/embeddings";
-      endpoint = url;
-    } catch {
-      return { ok: false, error: "服务地址不是合法的 http(s) 地址，或缺少 /v1 前缀。" };
-    }
-    try {
-      const send = (withDimensions: boolean) =>
-        (this.fetchImpl ?? fetch)(endpoint, {
-          method: "POST",
-          redirect: "error",
-          signal: AbortSignal.timeout(
-            Number(this.env.EMBEDDING_TIMEOUT_MS ?? 15000),
-          ),
-          headers: {
-            "Content-Type": "application/json",
-            ...(input.apiKey ? { Authorization: "Bearer " + input.apiKey } : {}),
-          },
-          body: JSON.stringify({
-            model: input.model,
-            input: "向量编码器连通性测试",
-            encoding_format: "float",
-            ...(withDimensions && input.dimension ? { dimensions: input.dimension } : {}),
-          }),
-        });
-      let response = await send(Boolean(input.dimension));
-      // 不支持 dimensions 的服务回 400/422：退回默认维度重试，让用户看到真实维度。
-      if (input.dimension && (response.status === 400 || response.status === 422))
-        response = await send(false);
-      if (!response.ok) {
-        // 网关常把真实原因放在响应体里（例如「embedding model [hy3] not found」），
-        // 只报 HTTP 500 用户无法判断是模型名错、维度错还是服务端故障。
-        const body = await response.text().catch(() => "");
-        let reason = body.slice(0, 300).replace(/\s+/g, " ").trim();
-        try {
-          const parsed = JSON.parse(body) as {
-            error?: { message?: unknown } | string;
-            message?: unknown;
-          };
-          const nested =
-            parsed.error && typeof parsed.error === "object" && typeof parsed.error.message === "string"
-              ? parsed.error.message
-              : typeof parsed.message === "string"
-                ? parsed.message
-                : typeof parsed.error === "string"
-                  ? parsed.error
-                  : "";
-          if (nested) reason = nested.replace(/\s+/g, " ").trim().slice(0, 300);
-        } catch {
-          /* keep raw text */
-        }
-        let detail: string;
-        if (response.status === 401 || response.status === 403) {
-          detail = "鉴权失败：API Key 无效或未设置。";
-        } else if (response.status === 404) {
-          detail =
-            "接口不存在：确认地址是 OpenAI 兼容基址，且不要包含 /embeddings 后缀。";
-        } else {
-          detail =
-            "服务拒绝请求（HTTP " +
-            response.status +
-            "）" +
-            (reason ? "：" + reason : "。");
-          // 聚合网关把聊天模型也列进 /models：选错后就是这句「embedding model [x] not found」。
-          // 直接点明原因并给出下一步，避免用户以为是服务故障。
-          if (/embedding model/i.test(reason) && /not found|unknown|no model/i.test(reason))
-            detail +=
-              "\n该模型不是向量模型（聊天模型无法生成向量）。请填该服务真正的向量模型名，例如 bge-m3、text-embedding-3-small、text-embedding-v3、nomic-embed-text；地址正确时可点「拉取模型」自动筛出能出向量的项。";
-        }
-        return { ok: false, error: detail };
-      }
-      const payload: unknown = await response.json();
-      const data =
-        payload && typeof payload === "object"
-          ? (payload as { data?: Array<{ embedding?: unknown }>; model?: unknown })
-          : {};
-      const vector = data.data?.[0]?.embedding;
-      if (!Array.isArray(vector) || vector.length < 1)
-        return { ok: false, error: "服务返回内容不是合法向量，无法确认维度。" };
-      return {
-        ok: true,
-        model: typeof data.model === "string" ? data.model : input.model,
-        dimension: vector.length,
-      };
-    } catch (error) {
-      return { ok: false, error: this.readableEncoderError(error) };
     }
   }
   /**
    * 拉取该服务提供的模型列表（OpenAI 兼容 GET /models）。
-   * probe=true 时逐个真实调用一次 /embeddings，标出哪些模型真的能出向量——聚合网关的
-   * /models 往往把聊天模型与向量模型混在一起（甚至像 magpie 那样根本列不出 bge-m3），
-   * 直接让用户从混杂列表里选，选到聊天模型后测试必然失败。
+   * 通用对话模型不需要能力探测：列表里的模型都可以直接用于记忆整理。
    */
   async listModels(input: {
     baseUrl: string;
     apiKey?: string;
-    probe?: boolean;
-  }): Promise<{
-    ok: boolean;
-    models: string[];
-    embeddable?: string[];
-    error?: string;
-  }> {
+  }): Promise<{ ok: boolean; models: string[]; error?: string }> {
     let endpoint: URL;
     try {
       const url = new URL(input.baseUrl);
@@ -768,74 +651,117 @@ export class MemoryService implements McpService<Context> {
         .map((row) => (typeof row?.id === "string" ? row.id : ""))
         .filter((id) => Boolean(id))
         .sort();
-      if (!input.probe) return { ok: true, models };
-      const key = input.apiKey?.trim() || this.apiKey() || undefined;
-      const probeAll = async (candidates: string[]): Promise<string[]> => {
-        const found: string[] = [];
-        // 限并发 3，避免一次拉取把上游网关打满；单个模型探测失败只代表它不能出向量。
-        const queue = [...candidates];
-        const worker = async () => {
-          for (;;) {
-            const model = queue.shift();
-            if (!model) return;
-            const probe = await this.probeEmbedding({
-              baseUrl: input.baseUrl,
-              model,
-              ...(key ? { apiKey: key } : {}),
-            });
-            if (probe.ok) found.push(model);
-          }
-        };
-        await Promise.all([worker(), worker(), worker()]);
-        return found;
-      };
-      let embeddable = await probeAll(models);
-      // 聚合网关常常根本不把向量模型列进 /models（例如 magpie 列出 10 个聊天模型，
-      // 能出向量的 workbuddy/bge-m3 却不在列表里）。列表里一个向量模型都没有时，
-      // 用列表出现过的厂商前缀 × 常见向量模型名再探一轮，给出可点的候选。
-      if (!embeddable.length) {
-        const prefixes = new Set<string>();
-        for (const name of models) {
-          const cut = name.indexOf("/");
-          if (cut > 0) prefixes.add(name.slice(0, cut));
-        }
-        const common = [
-          "bge-m3",
-          "bge-large-zh-v1.5",
-          "text-embedding-3-small",
-          "text-embedding-v3",
-          "embedding-3",
-          "nomic-embed-text",
-        ];
-        const candidates = new Set<string>();
-        for (const base of common) {
-          candidates.add(base);
-          for (const prefix of prefixes) candidates.add(prefix + "/" + base);
-        }
-        embeddable = await probeAll([...candidates].slice(0, 40));
-      }
-      embeddable.sort();
-      return { ok: true, models, embeddable };
+      return { ok: true, models };
     } catch (error) {
-      return { ok: false, models: [], error: this.readableEncoderError(error) };
+      return { ok: false, models: [], error: this.readableModelError(error) };
     }
   }
-  private readableEncoderError(error: unknown): string {
+  /**
+   * 用通用对话模型判断候选记忆是否相似，并据此重建相似关系（basis=llm）。
+   * 只做「文本相关性判断」，不计算任何向量。
+   */
+  async rebuildSimilarityWithModel(subjectId: string): Promise<{
+    memories: number;
+    candidates: number;
+    judged: number;
+    similar: number;
+    truncated: boolean;
+    basis: "llm";
+  }> {
+    const config = await this.effectiveModelConfig();
+    if (!config.enabled)
+      throw new DomainError(
+        "FEATURE_DISABLED",
+        "尚未配置通用模型；请在「记忆整理」页填写模型服务地址与模型名后再重建。",
+      );
+    const model = this.chatModel(config.baseUrl, config.model);
+    const candidates = await this.database.read<{
+      memories: number;
+      candidates: number;
+      truncated: boolean;
+      pairs: { a: string; b: string; similarity: number; aText: string; bText: string }[];
+    }>("similarity-candidates", "similarityCandidates", subjectId);
+    const accepted: { a: string; b: string; similarity: number }[] = [];
+    const batchSize = 10;
+    for (let i = 0; i < candidates.pairs.length; i += batchSize) {
+      const batch = candidates.pairs.slice(i, i + batchSize);
+      const listing = batch
+        .map(
+          (pair, index) =>
+            "[" +
+            index +
+            "] A:" +
+            pair.aText.replace(/\s+/g, " ").slice(0, 200) +
+            "\n    B:" +
+            pair.bText.replace(/\s+/g, " ").slice(0, 200),
+        )
+        .join("\n");
+      const prompt =
+        "下面是从记忆库中召回的可能相关的记忆对。请判断每一对是否在讲同一件事或高度相关（例如同一个人、同一个项目、同一偏好）。" +
+        "只输出一个 JSON 数组，不要解释。数组元素形如 {\"i\":序号,\"similar\":true或false,\"score\":0到1的小数}。\n" +
+        listing;
+      let verdicts: { i?: unknown; similar?: unknown; score?: unknown }[] = [];
+      try {
+        const reply = await model.chat(
+          [
+            { role: "system", content: "你是严谨的记忆库整理助手，只输出 JSON。" },
+            { role: "user", content: prompt },
+          ],
+          2048,
+        );
+        const first = reply.indexOf("[");
+        const last = reply.lastIndexOf("]");
+        if (first >= 0 && last > first) {
+          const parsed: unknown = JSON.parse(reply.slice(first, last + 1));
+          if (Array.isArray(parsed))
+            verdicts = parsed as { i?: unknown; similar?: unknown; score?: unknown }[];
+        }
+      } catch {
+        // 单批失败不影响其它批：这一批视为「无法判定」，不生成关系。
+        continue;
+      }
+      for (const verdict of verdicts) {
+        const index = Number(verdict.i);
+        if (!Number.isInteger(index) || index < 0 || index >= batch.length) continue;
+        if (verdict.similar !== true) continue;
+        const score = Number(verdict.score);
+        const pair = batch[index]!;
+        accepted.push({
+          a: pair.a,
+          b: pair.b,
+          similarity: Number.isFinite(score) ? Math.max(0, Math.min(1, score)) : 0.8,
+        });
+      }
+    }
+    const applied = await this.database.write<{ pairs: number }>(
+      "similarity-apply",
+      "applySimilarityPairs",
+      subjectId,
+      accepted,
+      "similarity-llm-v1",
+    );
+    return {
+      memories: candidates.memories,
+      candidates: candidates.candidates,
+      judged: candidates.pairs.length,
+      similar: applied.pairs,
+      truncated: candidates.truncated,
+      basis: "llm",
+    };
+  }
+  private readableModelError(error: unknown): string {
     const message =
       error instanceof Error && error.message ? error.message : "unknown error";
     if (/Invalid URL/i.test(message))
       return "服务地址不是合法的 http(s) 地址，或缺少 /v1 前缀。";
-    if (/dimension or values invalid/i.test(message))
-      return "返回向量长度与填写的向量维度不一致，请按模型真实输出维度填写。";
-    if (/model mismatch/i.test(message))
-      return "服务返回的 model 与填写的模型名不一致，请核对模型名。";
     if (/HTTP 401|HTTP 403/i.test(message))
       return "鉴权失败：请确认密钥已填写（界面保存或 EMBEDDING_API_KEY），且对该服务有效。";
     if (/HTTP 404/i.test(message))
-      return "接口不存在：确认地址是 OpenAI 兼容基址，且不要包含 /embeddings 后缀。";
+      return "接口不存在：确认地址是 OpenAI 兼容基址，且不要包含 /chat/completions 后缀。";
     if (/HTTP/i.test(message)) return message + "（服务端拒绝请求）。";
-    if (/timed out|timeout/i.test(message))
+    if (/timed out|timeout|abort/i.test(message))
       return "连接超时：确认服务已启动、地址与端口可达。";
     return message;
   }
 }
+

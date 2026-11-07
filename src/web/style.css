@@ -1815,3 +1815,30 @@ html[data-mobile="true"] .login-card h1 {
   color: var(--muted, #7a869a);
   font-weight: 600;
 }
+
+
+/* 模型设置折叠块：默认收起，点标题展开 */
+.model-settings-details {
+  border: 1px solid var(--border, #d8d8d8);
+  border-radius: 8px;
+  padding: 0 12px;
+  margin: 12px 0;
+}
+.model-settings-details > summary {
+  cursor: pointer;
+  padding: 10px 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  list-style: none;
+  user-select: none;
+}
+.model-settings-details > summary::-webkit-details-marker { display: none; }
+.model-settings-details > summary::before {
+  content: "▸";
+  font-size: 12px;
+  opacity: 0.6;
+}
+.model-settings-details[open] > summary::before { content: "▾"; }
+.model-settings-title { font-weight: 600; }
+.model-settings-hint { font-size: 12px; opacity: 0.65; }

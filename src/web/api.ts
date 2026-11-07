@@ -78,6 +78,12 @@ export interface EncoderPresetsResponse {
   /** 是否支持在界面里保存 Key（文件路径未配置时为 false）。 */
   can_store_key?: boolean;
 }
+export interface ModelTestResult {
+  ok: boolean;
+  model: string;
+  elapsed_ms: number;
+  error?: string;
+}
 export interface EncoderTestResult {
   ok: boolean;
   model: string;
@@ -229,11 +235,13 @@ export interface Config {
   similarityThreshold: number;
   similarityBuildThreshold: number;
   similarityFoldThreshold: number;
-  similarityBasis: "lexical" | "semantic" | "hybrid";
+  similarityBasis: "lexical" | "semantic" | "hybrid" | "llm";
   similaritySemanticThreshold: number;
   embeddingModel: string;
   embeddingBaseUrl: string;
   embeddingDimension: number;
+  llmBaseUrl: string;
+  llmModel: string;
   [key: string]: unknown;
 }
 export interface Backup {
