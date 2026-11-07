@@ -1807,3 +1807,11 @@ html[data-mobile="true"] .login-card h1 {
   background: rgba(0, 0, 0, 0.06);
   font-size: 12px;
 }
+
+/* 「记忆整理」页的分节标题 */
+.section-title {
+  margin: 20px 0 8px;
+  font-size: 15px;
+  color: var(--muted, #7a869a);
+  font-weight: 600;
+}

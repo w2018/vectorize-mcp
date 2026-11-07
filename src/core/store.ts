@@ -113,6 +113,7 @@ const defaults: Config = {
   purgeEnabled: false,
   protectedImportance: 80,
   minArchivedDays: 30,
+  semanticSearch: false,
   embeddingModel: "",
   embeddingBaseUrl: "",
   embeddingDimension: 0,
@@ -1909,7 +1910,9 @@ export class Store {
           ids: [duplicate.id],
         };
       }
-      const similar = this.similar(ctx, input.embedding);
+      const similar = input.embedding
+        ? this.similar(ctx, input.embedding)
+        : this.similarLexical(ctx, input);
       if (similar.length && !input.distinct_reason)
         return {
           data: {
@@ -2334,14 +2337,17 @@ export class Store {
       };
     });
   }
-  /** 记忆检索用的字符 bigram 特征；只在内存里算一次，按 revision 失效。 */
-  private featuresOf(m: Memory): Set<string> {
-    const cached = this.featureCache.get(m.id);
-    if (cached && cached.revision === m.revision) return cached.features;
-    const raw = [m.title, m.content, ...m.keywords].join(" ").toLowerCase();
+  /**
+   * 计算一组文本的字符 bigram 特征。中文按相邻二字切分，拉丁字母/数字按整词切分。
+   * 这样 "tea fact one" 与 "tea fact two" 只有 2/4 个词重合，不会被误判为同一条记忆。
+   */
+  private static featuresOfText(
+    title: string | undefined,
+    content: string,
+    keywords: string[],
+  ): Set<string> {
+    const raw = [title ?? "", content, ...keywords].join(" ").toLowerCase();
     const features = new Set<string>();
-    // 中文按相邻二字（bigram）切分，拉丁字母/数字按整词切分。这样 "tea fact one"
-    // 与 "tea fact two" 只有 2/4 个词重合，不会被误判为同一条记忆。
     for (const match of raw.matchAll(/[\p{Script=Han}]+|[\p{L}\p{N}]+/gu)) {
       const run = match[0];
       if (/^[\p{Script=Han}]+$/u.test(run)) {
@@ -2354,12 +2360,47 @@ export class Store {
         features.add(run);
       }
     }
-    for (const k of m.keywords) {
+    for (const k of keywords) {
       const token = normalize(k).toLowerCase();
       if (token) features.add(token);
     }
+    return features;
+  }
+  /** 记忆检索用的字符 bigram 特征；只在内存里算一次，按 revision 失效。 */
+  private featuresOf(m: Memory): Set<string> {
+    const cached = this.featureCache.get(m.id);
+    if (cached && cached.revision === m.revision) return cached.features;
+    const features = Store.featuresOfText(m.title, m.content, m.keywords);
     this.featureCache.set(m.id, { revision: m.revision, features });
     return features;
+  }
+  /**
+   * 纯词法模式下的写入近重复检查：不依赖向量。
+   * 与同账户现存记忆做字符 bigram Jaccard 比较，超过 similarityFoldThreshold 视为高重合。
+   */
+  private similarLexical(
+    ctx: Context,
+    input: { title?: string; content: string; keywords?: string[] },
+  ): { id: string; content: string; similarity: number }[] {
+    const probe = Store.featuresOfText(
+      input.title,
+      input.content,
+      input.keywords ?? [],
+    );
+    if (probe.size < 4) return [];
+    const threshold = this.getConfig().similarityFoldThreshold;
+    const results: { id: string; content: string; similarity: number }[] = [];
+    for (const m of this.all(ctx.subjectId)) {
+      if (m.status === "archived") continue;
+      const similarity = Store.jaccard(probe, this.featuresOf(m));
+      if (similarity >= threshold)
+        results.push({
+          id: m.id,
+          content: m.content.slice(0, 100),
+          similarity,
+        });
+    }
+    return results.sort((a, b) => b.similarity - a.similarity).slice(0, 3);
   }
   private static jaccard(a: Set<string>, b: Set<string>) {
     if (!a.size || !b.size) return 0;
@@ -3103,11 +3144,9 @@ export class Store {
         }),
         ids: items.map((m) => m.id),
         effective: true,
-        warnings:
-          prepared.warnings ??
-          (prepared.mode === "lexical"
-            ? ["Semantic retrieval unavailable; lexical matching used."]
-            : []),
+        // 纯词法检索是默认且正常的状态，默认不再附带「语义不可用」这类降级警告；
+        // 真正需要提示的编码失败由 service 层写入 prepared.warnings。
+        warnings: prepared.warnings ?? [],
       };
     });
   }
@@ -3408,6 +3447,7 @@ export class Store {
       "agentArchiveEnabled",
       "allowInferredProfiles",
       "purgeEnabled",
+      "semanticSearch",
     ] as const)
       check(typeof config[k] === "boolean");
     this.text(config.embeddingModel, 0, 200);

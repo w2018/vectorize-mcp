@@ -231,6 +231,7 @@ export async function buildApp(options: AppOptions) {
       listEncoderModels: (input) => service.listModels(input),
       keyStatus: () => service.keyStatus(),
       saveKey: (apiKey) => service.saveKey(apiKey),
+      ensureVectors: () => service.ensureVectors(),
     });
     app.get("/health", async () => ({ ok: true, version: APP_VERSION }));
     const webRoot = resolve(options.webRoot ?? "dist/web");

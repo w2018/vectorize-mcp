@@ -26,11 +26,14 @@ export function State({
   loading,
   error,
   empty = false,
+  emptyText,
   children,
 }: {
   loading: boolean;
   error: string;
   empty?: boolean;
+  /** 空态说明；缺省用通用文案。 */
+  emptyText?: string;
   children: ReactNode;
 }) {
   if (loading)
@@ -51,7 +54,7 @@ export function State({
       <div className="empty">
         <span className="empty-icon">◇</span>
         <strong>这里还没有内容</strong>
-        <p>创建第一条记录，或调整上方筛选条件。</p>
+        <p>{emptyText ?? "创建第一条记录，或调整上方筛选条件。"}</p>
       </div>
     );
   return <>{children}</>;

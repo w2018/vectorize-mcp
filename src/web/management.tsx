@@ -10,10 +10,6 @@ import {
   type CloudFile,
   type CloudJob,
   type Config,
-  type EncoderPresetsResponse,
-  type EncoderTestResult,
-  type EncoderModelsResult,
-  type EncoderKeyStatus,
   type BotPreset,
   type Page,
   type Preview,
@@ -1385,361 +1381,6 @@ export function Backups({
   );
 }
 
-const ENCODER_FIELD_KEYS = new Set<keyof Config>([
-  "embeddingBaseUrl",
-  "embeddingModel",
-  "embeddingDimension",
-]);
-
-/**
- * 向量编码器设置块：预设下拉 → 地址/Key/模型/维度 → 拉取模型列表 → 测试连接。
- * 只改 draft（表单草稿），所有探测请求都不写库、不改当前配置。
- * 维度可以留空：测试会回填服务真实返回的维度，避免「填错维度 → 每条记忆编码失败」。
- */
-function EncoderSettings({
-  draft,
-  setDraft,
-}: {
-  draft: Config;
-  setDraft: (next: Config) => void;
-}) {
-  const presets = useResource<EncoderPresetsResponse>(
-    "/config/embedding-presets",
-    0,
-  );
-  const [selected, setSelected] = useState("");
-  const [result, setResult] = useState<EncoderTestResult | null>(null);
-  const [models, setModels] = useState<string[]>([]);
-  /** 真实能出向量的模型（逐个探测得出）；列表非空时优先只显示这些。 */
-  const [embeddable, setEmbeddable] = useState<string[] | null>(null);
-  const [modelsError, setModelsError] = useState("");
-  const [keyInput, setKeyInput] = useState("");
-  const [keyState, setKeyState] = useState<EncoderKeyStatus | null>(null);
-  const [busy, setBusy] = useState<"none" | "test" | "models" | "key">("none");
-  const [error, setError] = useState("");
-
-  // 预设下拉要与服务端已保存的配置保持一致：之前只在首次加载时赋值一次，
-  // 保存后（active 变化）或刷新页面回来时不会同步，看起来像「配置没读回来」。
-  useEffect(() => {
-    if (presets.data) setSelected(presets.data.active);
-  }, [presets.data]);
-
-  useEffect(() => {
-    if (presets.data?.key) setKeyState(presets.data.key);
-  }, [presets.data]);
-
-  const items = presets.data?.items ?? [];
-  // 有实测结论时只列真正能出向量的模型；否则退回完整列表（用户可手填）。
-  const choices =
-    embeddable && embeddable.length > 0 ? embeddable : models;
-  const preset = items.find((item) => item.key === selected);
-  const configured = Boolean(draft.embeddingModel);
-  const addressAndModel =
-    Boolean(draft.embeddingBaseUrl.trim()) && Boolean(draft.embeddingModel.trim());
-  const dimension = Number(draft.embeddingDimension) || 0;
-  const canStoreKey = presets.data?.can_store_key !== false;
-  const keyReady =
-    keyState?.has_key ?? Boolean(presets.data?.key_from_env);
-
-  const applyPreset = (key: string) => {
-    setSelected(key);
-    setResult(null);
-    setModels([]);
-    setError("");
-    const target = items.find((item) => item.key === key);
-    if (!target || key === "custom") return;
-    setDraft({
-      ...draft,
-      embeddingBaseUrl: target.baseUrl,
-      embeddingModel: target.model,
-      embeddingDimension: target.dimension,
-    });
-  };
-
-  const saveKey = (value: string) => {
-    setBusy("key");
-    setError("");
-    void api<EncoderKeyStatus>("/config/embedding-key", "POST", value ? { api_key: value } : {})
-      .then((status) => {
-        setKeyState(status);
-        setKeyInput("");
-        setResult(null);
-      })
-      .catch((e: unknown) =>
-        setError(e instanceof Error ? e.message : "保存密钥失败"),
-      )
-      .finally(() => setBusy("none"));
-  };
-
-  const loadModels = () => {
-    if (!draft.embeddingBaseUrl.trim()) {
-      setModelsError("请先填写服务地址。");
-      return;
-    }
-    setBusy("models");
-    setModelsError("");
-    setEmbeddable(null);
-    // probe=true：网关的 /models 常把聊天模型与向量模型混列（有的甚至列不出真正的
-    // 向量模型），逐个试一次 /embeddings 才能知道哪个能用，避免「选了就测试失败」。
-    void api<EncoderModelsResult>("/config/embedding-models", "POST", {
-      baseUrl: draft.embeddingBaseUrl.trim(),
-      probe: true,
-      ...(keyInput.trim() ? { api_key: keyInput.trim() } : {}),
-    })
-      .then((data) => {
-        if (!data.ok) {
-          setModels([]);
-          setModelsError(data.error ?? "服务未返回模型列表。");
-          return;
-        }
-        setModels(data.models);
-        setEmbeddable(data.embeddable ?? null);
-        if (!data.models.length)
-          setModelsError("服务返回了空的模型列表，请手动填写模型名。");
-        else if (Array.isArray(data.embeddable)) {
-          setModelsError(
-            data.embeddable.length
-              ? ""
-              : "该服务的模型列表里没有能出向量的模型，请手动填写向量模型名（例如 bge-m3）。",
-          );
-        } else setModelsError("");
-      })
-      .catch((e: unknown) =>
-        setModelsError(e instanceof Error ? e.message : "拉取模型失败"),
-      )
-      .finally(() => setBusy("none"));
-  };
-
-  const test = () => {
-    if (!addressAndModel) {
-      setError("请先填写服务地址和模型名，向量维度可以留空由测试自动识别。");
-      return;
-    }
-    setBusy("test");
-    setError("");
-    setResult(null);
-    void api<EncoderTestResult>("/config/embedding-test", "POST", {
-      baseUrl: draft.embeddingBaseUrl.trim(),
-      model: draft.embeddingModel.trim(),
-      ...(dimension > 0 ? { dimension } : {}),
-      ...(keyInput.trim() ? { api_key: keyInput.trim() } : {}),
-    })
-      .then((data) => {
-        setResult(data);
-        // 真实维度回填：用户不必猜，也不会因维度写错而让所有检索退回词法。
-        if (data.ok && data.dimension > 0 && data.dimension !== dimension)
-          setDraft({ ...draft, embeddingDimension: data.dimension });
-      })
-      .catch((e: unknown) =>
-        setError(e instanceof Error ? e.message : "测试请求失败"),
-      )
-      .finally(() => setBusy("none"));
-  };
-
-  return (
-    <div className="encoder-settings">
-      <h3>向量编码器（语义检索）</h3>
-      <p className="encoder-intro">
-        {configured
-          ? "已启用语义检索：新写入与检索会调用该服务生成向量，结果标记 scoring_mode=semantic。"
-          : "当前未启用语义检索，检索只做词法匹配。配置并通过测试后，语义召回会明显提升，但记忆正文会发送到下面填写的服务。"}
-      </p>
-      <div className="settings-grid">
-        <label className="setting">
-          <span>选择服务预设</span>
-          <select
-            value={selected}
-            onChange={(e) => applyPreset(e.target.value)}
-          >
-            <option value="">请选择…</option>
-            {items.map((item) => (
-              <option key={item.key} value={item.key}>
-                {item.label}
-              </option>
-            ))}
-          </select>
-          <small>{preset?.summary ?? "选择预设会自动填入地址、模型与维度，仍可手动修改。"}</small>
-        </label>
-        <label className="setting">
-          <span>服务地址（baseUrl）</span>
-          <input
-            type="text"
-            value={draft.embeddingBaseUrl}
-            placeholder="https://api.openai.com/v1"
-            onChange={(e) => {
-              setResult(null);
-              setModels([]);
-              setDraft({ ...draft, embeddingBaseUrl: e.target.value });
-            }}
-          />
-          <small>
-            填到 <code>/v1</code> 这一层即可，程序会自动追加
-            <code>/embeddings</code> 与 <code>/models</code>；写成
-            <code>.../v1/embeddings</code> 会 404。
-          </small>
-        </label>
-        <label className="setting">
-          <span>服务密钥（API Key）</span>
-          <input
-            type="password"
-            value={keyInput}
-            disabled={!canStoreKey}
-            autoComplete="off"
-            placeholder={
-              keyState?.source === "file"
-                ? "已保存（输入新值可覆盖，留空不修改）"
-                : keyState?.source === "env"
-                  ? "当前来自服务端环境变量 EMBEDDING_API_KEY"
-                  : "粘贴该服务的 API Key"
-            }
-            onChange={(e) => setKeyInput(e.target.value)}
-          />
-          <small>
-            {canStoreKey
-              ? "加密保存在本机 data 目录，不会回显、不写日志；留空保存表示保持现状，点「清除密钥」才会删除。"
-              : "当前部署未启用界面保存密钥，只能由服务端环境变量 EMBEDDING_API_KEY 提供。"}
-          </small>
-          {canStoreKey && (
-            <small className="encoder-warn">
-              {keyReady
-                ? "已检测到可用密钥（来源：" +
-                  (keyState?.source === "file" ? "本机加密文件" : "环境变量") +
-                  "）。"
-                : "尚未配置密钥；需要鉴权的服务会返回 401。"}
-            </small>
-          )}
-          {canStoreKey && (
-            <span className="encoder-actions">
-              <button
-                type="button"
-                disabled={busy !== "none" || !keyInput.trim()}
-                onClick={() => saveKey(keyInput)}
-              >
-                {busy === "key" ? "保存中…" : "保存密钥"}
-              </button>
-              {keyState?.source === "file" && (
-                <button
-                  type="button"
-                  disabled={busy !== "none"}
-                  onClick={() => saveKey("")}
-                >
-                  清除密钥
-                </button>
-              )}
-            </span>
-          )}
-        </label>
-        <label className="setting">
-          <span>模型名（model）</span>
-          <span className="encoder-actions">
-            <input
-              type="text"
-              value={draft.embeddingModel}
-              placeholder="text-embedding-3-small"
-              onChange={(e) => {
-                setResult(null);
-                setDraft({ ...draft, embeddingModel: e.target.value });
-              }}
-            />
-            <button
-              type="button"
-              disabled={busy !== "none"}
-              onClick={loadModels}
-              title="调用 {baseUrl}/models 拉取该服务可用的模型"
-            >
-              {busy === "models" ? "拉取中…" : "拉取模型"}
-            </button>
-          </span>
-          {choices.length > 0 && (
-            <select
-              value=""
-              onChange={(e) => {
-                if (!e.target.value) return;
-                setResult(null);
-                setDraft({ ...draft, embeddingModel: e.target.value });
-              }}
-            >
-              <option value="">
-                从 {choices.length} 个可用模型中选择…
-                {embeddable && embeddable.length > 0 ? "（已实测能出向量）" : ""}
-              </option>
-              {choices.map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
-          )}
-          <small>
-            必须与服务端返回的 model 字段一致，否则写入向量会被拒绝。模型名可手填，也可从服务列表选择。
-          </small>
-          {modelsError && <small className="encoder-warn">{modelsError}</small>}
-        </label>
-        <label className="setting">
-          <span>向量维度（dimension）</span>
-          <input
-            type="number"
-            min={1}
-            max={8192}
-            value={dimension > 0 ? String(dimension) : ""}
-            placeholder="留空则由测试自动识别"
-            onChange={(e) => {
-              setResult(null);
-              setDraft({ ...draft, embeddingDimension: Number(e.target.value) });
-            }}
-          />
-          <small>
-            可留空：点「测试连接」会读回服务真实输出的维度并自动填入。
-            维度决定精度与存储（每条记忆 4 字节×维度），改维度会清空已有向量并触发重建。
-          </small>
-        </label>
-      </div>
-      <div className="encoder-actions">
-        <button type="button" disabled={busy !== "none"} onClick={test}>
-          {busy === "test" ? "测试中…" : "测试连接"}
-        </button>
-        {!addressAndModel && (
-          <span className="encoder-warn">
-            地址与模型必填；维度可留空。三项全部留空表示不使用语义检索。
-          </span>
-        )}
-      </div>
-      {error && <div className="notice warning">{error}</div>}
-      {result && (
-        <div className={"notice " + (result.ok ? "" : "warning")}>
-          {result.ok ? (
-            <>
-              <strong>连接成功</strong>
-              <p>
-                服务返回 {result.dimension} 维向量，耗时 {result.elapsed_ms} ms
-                {result.dimension_matched
-                  ? "，维度已对齐并填入上方输入框。"
-                  : "，维度与填写值不一致，请使用回填后的维度再保存。"}
-              </p>
-            </>
-          ) : (
-            <>
-              <strong>连接失败</strong>
-              <p>{result.error ?? "未知错误"}</p>
-            </>
-          )}
-        </div>
-      )}
-      <div className="notice">
-        <strong>启用后会发生什么</strong>
-        <p>
-          写入时对新记忆调用一次编码；检索时对查询编码并做向量相似度排序，
-          与词法结果合并（<code>scoring_mode=semantic</code>）。
-        </p>
-        <p>
-          模型或维度变化会清空已有向量并触发后台重建，重建完成前这些记忆退回词法；
-          统计页的「索引失败」「词法降级率」可用来确认是否真的生效。
-        </p>
-      </div>
-    </div>
-  );
-}
-
 const fields: {
   key: keyof Config;
   label: string;
@@ -1928,31 +1569,6 @@ const fields: {
     defaultValue: "关闭",
     advanced: true,
   },
-  {
-    key: "embeddingBaseUrl",
-    label: "编码器服务地址",
-    help: "OpenAI 兼容服务。远程服务会收到记忆正文；本地服务需另行启动。",
-    type: "text",
-    defaultValue: "未配置",
-    advanced: true,
-  },
-  {
-    key: "embeddingModel",
-    label: "编码器模型",
-    help: "切换模型需重建索引，重建完成前不能混用不同模型向量。",
-    type: "text",
-    defaultValue: "未配置",
-    advanced: true,
-  },
-  {
-    key: "embeddingDimension",
-    label: "向量维度",
-    help: "必须与模型输出一致，可在上方编码器块点「测试连接」自动识别。",
-    min: 1,
-    max: 8192,
-    defaultValue: "以服务配置为准",
-    advanced: true,
-  },
 ];
 export function Settings({ refresh }: { refresh: number }) {
   const [version, setVersion] = useState(0);
@@ -1993,12 +1609,12 @@ export function Settings({ refresh }: { refresh: number }) {
         </div>
         {advanced && (
           <div className="notice">
-            <strong>模型配置如何生效</strong>
+            <strong>检索与编码器</strong>
             <p>
-              发布后的模型服务配置动态用于新请求，无需重启。模型或维度变化会触发后台索引重建；保存成功只代表配置已发布，不代表全部记忆已完成编码。
+              检索始终按词法匹配，不受编码器影响。向量编码器已移到「记忆整理」页，只用于按语义重建相似关系。
             </p>
             <p>
-              不同模型的向量不会混用。未配置编码器、编码失败或缺少有效向量时，检索会明确使用词法降级；请结合记忆详情的索引状态与统计中的索引失败、降级率检查，不能将词法结果视为语义检索已就绪。
+              这里的发布只改变规则与统计口径，发布成功即对新请求生效，无需重启。
             </p>
           </div>
         )}
@@ -2030,7 +1646,6 @@ export function Settings({ refresh }: { refresh: number }) {
                 {fields
                   .filter(
                     (f) =>
-                      !ENCODER_FIELD_KEYS.has(f.key) &&
                       (advanced || !f.advanced) &&
                       (!search || (f.label + f.help).includes(search)),
                   )
@@ -2091,9 +1706,6 @@ export function Settings({ refresh }: { refresh: number }) {
                     </label>
                   ))}
               </div>
-              {/* 编码器是核心功能，不能藏在「高级设置」后面：折叠时刷新页面会看起来
-                  「已保存的配置丢失」（输入框根本没渲染）。任何模式下都必须显示。 */}
-              <EncoderSettings draft={draft} setDraft={setDraft} />
               <footer>
                 <span>配置版本 {draft.revision}</span>
                 <button
@@ -2104,9 +1716,7 @@ export function Settings({ refresh }: { refresh: number }) {
                       const patch = Object.fromEntries(
                         fields
                           .filter(
-                            (f) =>
-                              f.type !== "text" &&
-                              f.key !== "embeddingDimension",
+                            (f) => f.type !== "text",
                           )
                           .map((f) => [
                             f.key,

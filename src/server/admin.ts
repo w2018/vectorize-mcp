@@ -183,6 +183,12 @@ export async function registerAdmin(
     saveKey?: (
       apiKey: string,
     ) => { has_key: boolean; source: "file" | "env" | "none" };
+    /** 重建相似关系前批量补齐向量（语义/混合依据需要）。 */
+    ensureVectors?: () => Promise<{
+      attempted: number;
+      stored: number;
+      failed: number;
+    }>;
   },
 ): Promise<void> {
   const installRoot = resolve(options.updateRoot ?? process.cwd());
@@ -645,12 +651,26 @@ export async function registerAdmin(
         throw new DomainError("VALIDATION_ERROR", "相似关系依据只能是 lexical / semantic / hybrid。");
       basis = b.basis;
     }
-    return write("rebuildSimilarity", subject(b), {
+    // 语义/混合依据必须有向量：先批量补齐，再重建；没有可用编码器时明确报错，
+    // 避免用户看到「重建成功」但实际只算出零条关系。
+    let effectiveBasis = basis;
+    if (!effectiveBasis) {
+      const cfg = await read<{ similarityBasis?: string }>("getConfig");
+      effectiveBasis =
+        (cfg.similarityBasis as "lexical" | "semantic" | "hybrid") ?? "lexical";
+    }
+    let vectors: { attempted: number; stored: number; failed: number } | undefined;
+    if (effectiveBasis !== "lexical") {
+      if (!options.ensureVectors) throw new DomainError("FEATURE_DISABLED");
+      vectors = await options.ensureVectors();
+    }
+    const rebuilt = (await write("rebuildSimilarity", subject(b), {
       threshold,
       basis,
       neighbors:
         b.neighbors === undefined ? undefined : integer(b.neighbors, 5, 20),
-    });
+    })) as Record<string, unknown>;
+    return { ...rebuilt, basis: effectiveBasis, vectors };
   });
   for (const path of ["/memories", "/profiles"])
     route("GET", path, async (req) => {

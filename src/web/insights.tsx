@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Graph3D } from "./graph3d";
+import { EncoderConfigCard } from "./encoder-settings";
 import {
   api,
   dataChanged,
@@ -8,7 +9,6 @@ import {
   type AccountKind,
   type Graph,
   type AccountStats,
-  type Config,
   type Link,
   type Memory,
   type Page,
@@ -641,20 +641,7 @@ export function Stats({
     "/stats/accounts" + query({ days }),
     refresh,
   );
-  const config = useResource<Config>("/config", refresh);
-  const [rebuilding, setRebuilding] = useState(false);
-  const [rebuildResult, setRebuildResult] = useState<string>("");
-  // 重建依据：词法认字面、语义认同义（换说法也能关联），hybrid 取两者较高者。
-  const [basis, setBasis] = useState<"lexical" | "semantic" | "hybrid">("semantic");
   const d = data.data;
-  // 编码器「未配置」与「配置不完整」要区分：后者会让每次编码失败并静默降级，
-  // 用户只看到词法结果却以为语义已开启。
-  const embeddingMissing = config.data && !config.data.embeddingModel;
-  const embeddingPartial =
-    config.data &&
-    Boolean(config.data.embeddingModel) &&
-    (!config.data.embeddingBaseUrl ||
-      Number(config.data.embeddingDimension ?? 0) < 1);
   const pct = (value: number | null | undefined) =>
     value == null ? "—" : (value * 100).toFixed(1) + "%";
   const metricGroups = [
@@ -689,7 +676,6 @@ export function Stats({
             : "—",
         ],
         ["被找到次数", d?.retrieval_count],
-        ["词法降级率", pct(d?.degraded_rate)],
         ["索引失败", d?.index_failed],
       ],
     },
@@ -712,48 +698,6 @@ export function Stats({
           <option value="90">最近 90 天</option>
         </select>
       </Heading>
-      <div className="maintenance-row">
-        <select
-          value={basis}
-          onChange={(e) => setBasis(e.target.value as "lexical" | "semantic" | "hybrid")}
-          aria-label="相似关系依据"
-        >
-          <option value="semantic">语义（按向量，识别换了说法的同义记忆）</option>
-          <option value="hybrid">混合（词法与语义取较高者）</option>
-          <option value="lexical">词法（按字面 bigram，快但认不出同义）</option>
-        </select>
-        <button
-          disabled={rebuilding}
-          onClick={async () => {
-            setRebuilding(true);
-            setRebuildResult("");
-            try {
-              const stats = await api<{ memories: number; pairs: number; basis?: string }>(
-                "/maintenance/similarity",
-                "POST",
-                writeBody({ subject_id: subject, neighbors: 5, basis }),
-              );
-              setRebuildResult(
-                "已按「" +
-                  (basis === "semantic" ? "语义" : basis === "hybrid" ? "混合" : "词法") +
-                  "」扫描 " +
-                  stats.memories +
-                  " 条记忆，关联 " +
-                  stats.pairs +
-                  " 对相似记忆。",
-              );
-              dataChanged();
-            } catch (error) {
-              setRebuildResult(error instanceof Error ? error.message : "重建失败");
-            } finally {
-              setRebuilding(false);
-            }
-          }}
-        >
-          {rebuilding ? "正在重建…" : "重建相似关系"}
-        </button>
-        <span className="muted">{rebuildResult}</span>
-      </div>
       <State loading={data.loading} error={data.error}>
         <div className="metric-groups">
           {metricGroups.map((group) => (
@@ -772,18 +716,6 @@ export function Stats({
         </div>
         <section className="panel padded">
           <h2>如何理解这些数字</h2>
-          {embeddingMissing && (
-            <div className="notice warning">
-              当前未配置向量编码器，检索只能走词法匹配；上方「词法降级率」会显示所选时间范围内的实际降级比例。到「设置 → 高级设置 → 向量编码器」选择服务预设并点「测试连接」通过后保存，可启用语义检索、明显提升召回率与有结果率。
-            </div>
-          )}
-          {embeddingPartial && (
-            <div className="notice warning">
-              向量编码器配置不完整（服务地址或向量维度缺失/为
-              0），编码会失败并退回词法检索。请到「设置 → 高级设置 →
-              向量编码器」补全三项并测试连接。
-            </div>
-          )}
           <p>
             <strong>有结果率</strong> = 至少返回一条记忆的检索次数 ÷
             检索总次数。它只说明“有没有搜到东西”，不代表搜到的是否正确；样本若来自压测或预筛过的可答查询，这个数字会偏高，不能当作检索质量。
@@ -797,10 +729,6 @@ export function Stats({
             。普通搜索没有标准答案，因此显示为“—”。
           </p>
           <p>
-            <strong>重建相似关系</strong> 会扫描当前账户全部记忆，按「设置 → 检索配置」中的相似度构建阈值重新生成 memory_similarity
-            自动关系，用于检索时折叠高度相似记忆、减少重复内容；它不会修改或删除手动关系链（links）。
-          </p>
-          <p>
             <strong>提取内容 token</strong> 为所选时间范围内实际返回内容的累计估算，用于衡量检索带来的上下文成本；v0.5.0 起所有「token」口径统一为响应 data 的 UTF-8 字节数（与 token_budget 同单位），不是模型精确分词，也不代表计费
             token；<strong>记忆内容 token</strong>
             是当前所有记忆正文的估算总量。没有检索请求时命中率、空结果率等显示为“—”。
@@ -809,14 +737,10 @@ export function Stats({
             <strong>被找到次数</strong>仅统计最终交给助手的记忆，不包含候选项、管理浏览和重复请求，次数不代表独立会话数；同一记忆在不同会话中被再次命中会累加。
           </p>
           <p>
-            <strong>词法降级率</strong>表示该次检索没有使用有效向量（编码器未配置、索引失败或向量过期时会降级为纯词法）。请结合下方「索引失败」和编码器配置排查，不要把词法检索当作语义检索正常。
-          </p>
-          <p>
             <strong>如何提高命中率</strong>：① 让 Agent
             在会话开始就检索，并传入贴近记忆内容的自然语言 query（无需再靠穷举关键词）；
-            ② 配置向量编码器启用语义检索；③
-            记忆正文写完整句子、关键词填写同义说法；④
-            关注「空结果率」「词法降级率」「索引失败」三项，任一异常先修检索链路。
+            ② 记忆正文写完整句子、关键词填写同义说法；③
+            关注「空结果率」「索引失败」两项，任一异常先排查检索链路。
           </p>
           <small>
             统计口径：按所选时间范围实时聚合检索与记忆数据，页面打开或切换范围时重新计算；统计时点：
@@ -916,18 +840,100 @@ export function Suggestions({
     body: Record<string, unknown>;
   } | null>(null);
   const [merge, setMerge] = useState<Suggestion | null>(null);
+  const [rebuilding, setRebuilding] = useState(false);
+  const [rebuildResult, setRebuildResult] = useState("");
+  // 重建依据：词法认字面、语义认同义（换说法也能关联），hybrid 取两者较高者。
+  const [basis, setBasis] = useState<"lexical" | "semantic" | "hybrid">(
+    "semantic",
+  );
   return (
     <>
       <Heading
-        eyebrow="A LITTLE CARE"
-        title="整理建议"
-        description="重复、冲突和过期只是提醒。由你判断是否保留，系统不会自动删除。"
+        eyebrow="MEMORY CARE"
+        title="记忆整理"
+        description="配置向量编码器并重建相似关系，再逐条处理过期、低权重和冲突的记忆。系统不会自动删除。"
       />
       <Feedback error={action.error} notice={action.notice} />
+      <section className="panel padded">
+        <h2>向量编码器</h2>
+        <p className="muted">
+          编码器只用于下面的「重建相似关系」，不改变检索方式——检索始终按词法匹配。未配置时只能按词法重建。
+        </p>
+        <EncoderConfigCard />
+      </section>
+      <section className="panel padded">
+        <h2>重建相似关系</h2>
+        <p className="muted">
+          扫描当前账户全部记忆，按所选依据重新生成自动相似关系，用于检索时折叠高度相似记忆。语义/混合依据会先补齐向量，可能需要一段时间。不会修改或删除手动关系链。
+        </p>
+        <div className="maintenance-row">
+          <select
+            value={basis}
+            onChange={(e) =>
+              setBasis(e.target.value as "lexical" | "semantic" | "hybrid")
+            }
+            aria-label="相似关系依据"
+          >
+            <option value="semantic">语义（按向量，识别换了说法的同义记忆）</option>
+            <option value="hybrid">混合（词法与语义取较高者）</option>
+            <option value="lexical">词法（按字面 bigram，快但认不出同义）</option>
+          </select>
+          <button
+            disabled={rebuilding}
+            onClick={async () => {
+              setRebuilding(true);
+              setRebuildResult("");
+              try {
+                const stats = await api<{
+                  memories: number;
+                  pairs: number;
+                  basis?: string;
+                  vectors?: { attempted: number; stored: number; failed: number };
+                }>("/maintenance/similarity", "POST", writeBody({
+                  subject_id: subject,
+                  neighbors: 5,
+                  basis,
+                }));
+                const vectorNote = stats.vectors
+                  ? "（补齐向量 " +
+                    stats.vectors.stored +
+                    " 条" +
+                    (stats.vectors.failed ? "，" + stats.vectors.failed + " 条失败" : "") +
+                    "）"
+                  : "";
+                setRebuildResult(
+                  "已按「" +
+                    (basis === "semantic" ? "语义" : basis === "hybrid" ? "混合" : "词法") +
+                    "」扫描 " +
+                    stats.memories +
+                    " 条记忆，关联 " +
+                    stats.pairs +
+                    " 对相似记忆" +
+                    vectorNote +
+                    "。",
+                );
+                dataChanged();
+                setVersion((v) => v + 1);
+              } catch (error) {
+                setRebuildResult(
+                  error instanceof Error ? error.message : "重建失败",
+                );
+              } finally {
+                setRebuilding(false);
+              }
+            }}
+          >
+            {rebuilding ? "正在重建…" : "重建相似关系"}
+          </button>
+          {rebuildResult && <span className="muted">{rebuildResult}</span>}
+        </div>
+      </section>
+      <h2 className="section-title">整理建议</h2>
       <State
         loading={data.loading}
         error={data.error}
         empty={!data.data?.items.length}
+        emptyText="当前没有需要整理的过期、低权重或冲突记忆。"
       >
         {data.data?.items.map((s, i) => (
           <section className="panel padded" key={s.id || i}>

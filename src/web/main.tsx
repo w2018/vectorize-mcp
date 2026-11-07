@@ -13,7 +13,7 @@ const navigation = [
   ["stats", "▥", "统计面板"],
   ["memories", "▤", "记忆"],
   ["graph", "✧", "记忆星图"],
-  ["suggestions", "✓", "整理建议"],
+  ["suggestions", "✓", "记忆整理"],
   ["tokens", "⌘", "账户与凭据"],
   ["backups", "◷", "备份与数据"],
   ["settings", "⚙", "设置"],

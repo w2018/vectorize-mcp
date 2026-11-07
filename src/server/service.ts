@@ -74,6 +74,7 @@ export class MemoryService implements McpService<Context> {
   }
   async effectiveEmbeddingConfig(): Promise<{
     enabled: boolean;
+    semanticSearch: boolean;
     baseUrl: string;
     model: string;
     dimension: number;
@@ -87,6 +88,8 @@ export class MemoryService implements McpService<Context> {
     const configured = !!config?.embeddingModel;
     return {
       enabled: configured || !!this.fallback,
+      // 语义检索默认关闭：编码器只服务于「记忆整理 → 重建相似关系」的批量向量计算。
+      semanticSearch: config?.semanticSearch === true,
       baseUrl: configured
         ? config.embeddingBaseUrl
         : (this.env.EMBEDDING_BASE_URL ?? ""),
@@ -106,8 +109,11 @@ export class MemoryService implements McpService<Context> {
   }
   /** 最近一次编码器构造失败的原因；供检索给出可读降级警告，而不是抛 500。 */
   private encoderFailure = "";
-  private async encoder(): Promise<EmbeddingProvider | null> {
+  private async encoder(force = false): Promise<EmbeddingProvider | null> {
     const config = await this.effectiveEmbeddingConfig();
+    // force 用于「重建相似关系」这类显式需要向量的场景；普通检索与写入在
+    // semanticSearch 关闭时一律不触碰编码器（不配置也能正常写入与检索）。
+    if (!force && !config.semanticSearch) return null;
     if (!config.enabled) return null;
     if (!config.baseUrl && this.fallback) return this.fallback;
     const key = JSON.stringify(config);
@@ -160,6 +166,7 @@ export class MemoryService implements McpService<Context> {
   }
   async reindexBatch(
     max = 10,
+    force = false,
   ): Promise<{
     attempted: number;
     stored: number;
@@ -172,7 +179,7 @@ export class MemoryService implements McpService<Context> {
       return { attempted: 0, stored: 0, failed: 0, skipped: true };
     this.reindexRunning = true;
     try {
-      const embedding = await this.encoder();
+      const embedding = await this.encoder(force);
       if (!embedding)
         return { attempted: 0, stored: 0, failed: 0, skipped: true };
       const model = this.identity(embedding);
@@ -199,7 +206,7 @@ export class MemoryService implements McpService<Context> {
             item.subject_id,
           );
           const vector = await embedding.embed(item.content);
-          const current = await this.encoder();
+          const current = await this.encoder(force);
           if (!current || this.identity(current) !== model) break; // Model changed while encoding.
           await this.validate(ctx);
           const result = await this.database.write<{ stored: boolean }>(
@@ -217,6 +224,70 @@ export class MemoryService implements McpService<Context> {
         }
       }
       return { attempted: items.length, stored, failed, skipped: false };
+    } finally {
+      this.reindexRunning = false;
+    }
+  }
+  /**
+   * 为「重建相似关系」批量补齐向量。与后台 reindexBatch 不同：这里无视 semanticSearch
+   * 开关、一次性把全部缺失/过期的向量编码完，并在无可用的向量编码器时给出明确错误。
+   */
+  async ensureVectors(): Promise<{
+    attempted: number;
+    stored: number;
+    failed: number;
+  }> {
+    const embedding = await this.encoder(true);
+    if (!embedding)
+      throw new DomainError(
+        "VALIDATION_ERROR",
+        "未配置可用的向量编码器，无法按语义重建相似关系。请先在「记忆整理」页填写服务地址、模型和维度，或改用词法依据。",
+      );
+    if (this.reindexRunning)
+      throw new DomainError("OVERLOADED", "向量回填正在进行，请稍后再试。");
+    this.reindexRunning = true;
+    try {
+      const model = this.identity(embedding);
+      let attempted = 0;
+      let stored = 0;
+      let failed = 0;
+      let cursor = "";
+      for (;;) {
+        const items = await this.database.read<
+          Array<{
+            subject_id: string;
+            id: string;
+            revision: number;
+            content: string;
+          }>
+        >("reindex", "pendingEmbeddings", 50, model, cursor);
+        if (!items.length) break;
+        for (const item of items) {
+          cursor = item.id;
+          attempted++;
+          try {
+            const ctx = await this.database.read<Context>(
+              "reindex",
+              "adminFor",
+              item.subject_id,
+            );
+            const vector = await embedding.embed(item.content);
+            const result = await this.database.write<{ stored: boolean }>(
+              "reindex",
+              "setEmbedding",
+              ctx,
+              item.id,
+              item.revision,
+              model,
+              vector,
+            );
+            if (result.stored) stored++;
+          } catch {
+            failed++;
+          }
+        }
+      }
+      return { attempted, stored, failed };
     } finally {
       this.reindexRunning = false;
     }
@@ -266,8 +337,16 @@ export class MemoryService implements McpService<Context> {
       : null;
     const modelIdentity = embedding ? this.identity(embedding) : null;
     let result: unknown;
-    if (tool === "memory_search")
-      result = await this.search(ctx, input as SearchInput, embedding);
+    if (tool === "memory_search") {
+      const semanticDisabled = !(await this.effectiveEmbeddingConfig())
+        .semanticSearch;
+      result = await this.search(
+        ctx,
+        input as SearchInput,
+        embedding,
+        semanticDisabled,
+      );
+    }
     else if (
       tool === "memory_get" ||
       tool === "memory_config_get" ||
@@ -335,6 +414,7 @@ export class MemoryService implements McpService<Context> {
     ctx: Context,
     input: SearchInput,
     embedding: EmbeddingProvider | null,
+    semanticDisabled = false,
   ): Promise<Envelope<SearchData>> {
     const modelIdentity = embedding ? this.identity(embedding) : null;
     // Replay first: an old snapshot must be rejected, not silently replaced by a fresh search.
@@ -366,7 +446,11 @@ export class MemoryService implements McpService<Context> {
           reason.slice(0, 200) +
           "); lexical fallback only.";
       }
-    } else if (this.encoderFailure)
+    } else if (semanticDisabled)
+      // 语义检索是可选的「记忆整理」能力：关闭时检索就是纯词法，属于正常状态，
+      // 不能报「未配置/降级」这类让用户以为出错的警告。
+      warning = undefined;
+    else if (this.encoderFailure)
       // 配置有值但编码器无法构造（地址非法/维度为 0）：必须说明真实原因，
       // 否则用户只会看到「未配置」，去设置页也看不出哪里填错了。
       warning =

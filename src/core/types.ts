@@ -173,6 +173,8 @@ export interface Config {
   purgeEnabled: boolean;
   protectedImportance: number;
   minArchivedDays: number;
+  /** 语义检索开关：默认关闭（检索只走词法）。编码器仅在「记忆整理」重建相似关系时使用。 */
+  semanticSearch: boolean;
   embeddingModel: string;
   embeddingBaseUrl: string;
   embeddingDimension: number;
