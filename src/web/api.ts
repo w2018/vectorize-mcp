@@ -281,6 +281,24 @@ export interface MaintenanceJob {
   result: Record<string, unknown>;
   error: string;
 }
+export interface MergeBatchDetail {
+  group_id: string;
+  target_id: string;
+  new_revision: number;
+  archived: { id: string; revision: number }[];
+  before?: { id: string; title?: string; content: string; score: number; type?: string }[];
+  after?: { title?: string; content: string; type: string; reason: string };
+}
+export interface MergeBatch {
+  id: string;
+  subject_id: string;
+  job_id: string;
+  status: string;
+  groups: number;
+  detail: MergeBatchDetail[];
+  created_at: number;
+  undone_at: number | null;
+}
 export interface MergeDraft {
   group_id: string;
   title?: string;

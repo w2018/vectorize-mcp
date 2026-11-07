@@ -344,7 +344,7 @@ export function MemoryEditor({
             关闭
           </button>
           <button className="primary" disabled={action.busy}>
-            {action.busy ? "正在保存…" : "保存记忆"}
+            {action.busy ? "正在保存" : "保存记忆"}
           </button>
         </footer>
       </form>
@@ -505,7 +505,7 @@ export function Memories({
             ⌕
             <input
               aria-label="搜索记忆"
-              placeholder="搜索标题、内容或关键词…"
+              placeholder="搜索标题、内容或关键词"
               value={search}
               onChange={(e) => {
                 setSearch(e.target.value);
@@ -598,7 +598,7 @@ export function Memories({
                         disabled={action.busy}
                         onClick={() => prepare(m, "archive")}
                       >
-                        归档…
+                        归档
                       </button>
                     )}
                     <button
@@ -606,7 +606,7 @@ export function Memories({
                       disabled={action.busy}
                       onClick={() => prepare(m, "delete")}
                     >
-                      删除…
+                      删除
                     </button>
                   </div>
                 </div>
@@ -697,7 +697,7 @@ export function Memories({
                 disabled={action.busy}
                 onClick={() => void prepare(detail, "archive")}
               >
-                归档…
+                归档
               </button>
             ) : (
               <button
@@ -715,7 +715,7 @@ export function Memories({
               disabled={action.busy}
               onClick={() => void prepare(detail, "delete")}
             >
-              删除…
+              删除
             </button>
           </footer>
         </Modal>
@@ -759,7 +759,7 @@ export function Memories({
                 disabled={action.busy || !reasonText.trim()}
                 title={reasonText.trim() ? undefined : "请先填写操作原因"}
               >
-                {action.busy ? "正在读取预览…" : "查看预览"}
+                {action.busy ? "正在读取预览" : "查看预览"}
               </button>
             </footer>
           </form>

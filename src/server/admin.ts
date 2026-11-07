@@ -178,12 +178,17 @@ export async function registerAdmin(
       listGroups(subjectId: string, filters: { status?: string; limit?: number; offset?: number }): Promise<unknown>;
       getGroup(subjectId: string, id: string): Promise<unknown>;
       ignoreGroups(subjectId: string, ids: string[]): Promise<unknown>;
-      rebuildGroups(subjectId: string, options: { limit?: number; groupThreshold?: number }): Promise<unknown>;
+      rebuildGroups(
+        subjectId: string,
+        options: { limit?: number; groupThreshold?: number; basis?: "lexical" | "llm" },
+      ): Promise<unknown>;
       previewMerge(subjectId: string, groupId: string): Promise<unknown>;
       startMerge(subjectId: string, groupIds: string[]): Promise<unknown>;
       getJob(jobId: string): Promise<unknown>;
       cancelJob(jobId: string): Promise<unknown>;
-      undoBatch(subjectId: string, batchId: string): Promise<unknown>;
+      undoBatch(subjectId: string, batchId: string, groupIds?: string[]): Promise<unknown>;
+      getBatch(subjectId: string, batchId: string): Promise<unknown>;
+      listBatches(subjectId: string, limit?: number): Promise<unknown>;
       compactPreview(subjectId: string): Promise<unknown>;
       compact(subjectId: string): Promise<unknown>;
     };
@@ -671,10 +676,17 @@ export async function registerAdmin(
     const m = options.maintenance;
     if (!m) throw new DomainError("FEATURE_DISABLED");
     const b = body(req);
+    const basis = b.basis === "llm" ? "llm" : "lexical";
+    let groupThreshold: number | undefined;
+    if (b.group_threshold !== undefined) {
+      groupThreshold = Number(b.group_threshold);
+      if (!Number.isFinite(groupThreshold) || groupThreshold < 0.3 || groupThreshold > 0.99)
+        throw new DomainError("VALIDATION_ERROR", "合并阈值需在 0.30 到 0.99 之间。");
+    }
     return m.rebuildGroups(subject(b), {
       limit: b.limit === undefined ? undefined : integer(b.limit, 10, 2000),
-      groupThreshold:
-        b.group_threshold === undefined ? undefined : Number(b.group_threshold),
+      groupThreshold,
+      basis,
     });
   });
   route("GET", "/maintenance/groups", async (req) => {
@@ -728,11 +740,25 @@ export async function registerAdmin(
     if (!m) throw new DomainError("FEATURE_DISABLED");
     return m.cancelJob(param(req));
   });
+  route("GET", "/maintenance/batches", async (req) => {
+    const m = options.maintenance;
+    if (!m) throw new DomainError("FEATURE_DISABLED");
+    const q = query(req);
+    return m.listBatches(subject(q), q.limit === undefined ? undefined : integer(q.limit, 1, 100));
+  });
+  route("GET", "/maintenance/batches/:id", async (req) => {
+    const m = options.maintenance;
+    if (!m) throw new DomainError("FEATURE_DISABLED");
+    return m.getBatch(subject(query(req)), param(req));
+  });
   route("POST", "/maintenance/merge/undo", async (req) => {
     const m = options.maintenance;
     if (!m) throw new DomainError("FEATURE_DISABLED");
     const b = body(req);
-    return m.undoBatch(subject(b), text(b.batch_id));
+    const ids = Array.isArray(b.group_ids)
+      ? b.group_ids.filter((id: unknown): id is string => typeof id === "string")
+      : undefined;
+    return m.undoBatch(subject(b), text(b.batch_id), ids);
   });
   route("POST", "/maintenance/compact/preview", async (req) => {
     const m = options.maintenance;

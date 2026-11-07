@@ -1858,3 +1858,39 @@ html[data-mobile="true"] .login-card h1 {
 .modal { background: #fff; border-radius: 10px; padding: 18px 20px; width: min(640px, 92vw); max-height: 86vh; overflow: auto; box-shadow: 0 12px 40px rgba(0,0,0,.25); }
 .merge-preview textarea { width: 100%; box-sizing: border-box; font: inherit; }
 button.link { background: none; border: none; color: #2f7cf6; cursor: pointer; padding: 0 4px; }
+/* v0.6.3 同行控件不换行 + 手机端横向滚动 */
+.maintenance-row { flex-wrap: nowrap; overflow-x: auto; white-space: nowrap; }
+.maintenance-row > * { flex: 0 0 auto; }
+.maintenance-row label,
+.maintenance-row button,
+.maintenance-row select,
+.maintenance-row input,
+.maintenance-row span,
+.merge-group-head,
+.merge-group-head span,
+.merge-group-actions,
+.merge-batches h3,
+.merge-batch-row,
+.merge-batch-row span,
+.inline-field,
+.inline-field label,
+button,
+.tag { white-space: nowrap; }
+.inline-field { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+.inline-field input { width: 92px; }
+.merge-batches { margin-top: 16px; }
+.merge-batch-row { display: flex; align-items: center; gap: 10px; flex-wrap: nowrap; overflow-x: auto; padding: 4px 0; font-size: 13px; }
+.compare-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+.compare-item { border-bottom: 1px dashed #e2e2e2; padding: 6px 0; }
+.compare-item p { margin: 2px 0 0; white-space: pre-wrap; }
+.compare-group { border-top: 1px solid #e2e2e2; padding: 10px 0; }
+.modal.merge-compare { width: min(980px, 94vw); }
+.modal.merge-preview { width: min(980px, 94vw); }
+@media (max-width: 720px) {
+  html[data-mobile="true"] section.panel.padded,
+  html[data-mobile="true"] .maintenance-row,
+  html[data-mobile="true"] .merge-batch-row,
+  html[data-mobile="true"] table,
+  html[data-mobile="true"] .settings-grid { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  html[data-mobile="true"] .compare-cols { grid-template-columns: 1fr; }
+}

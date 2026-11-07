@@ -3,6 +3,7 @@ import {
   api,
   writeBody,
   type MaintenanceJob,
+  type MergeBatch,
   type MergeDraft,
   type SimilarityGroup,
 } from "./api";
@@ -14,7 +15,7 @@ const RISK_LABEL: Record<string, string> = {
   PROTECTED: "受保护类型",
 };
 
-/** 记忆整理页：相似分组 → 人工勾选 → 模型压缩去重合并（全后台任务 + 轮询）。 */
+/** 记忆整理页：相似分组 -> 人工勾选 -> 模型压缩去重合并（全后台任务 + 进度轮询）。 */
 export function MergeGroupsPanel({
   subject,
   onChanged,
@@ -33,17 +34,25 @@ export function MergeGroupsPanel({
   const [draftContent, setDraftContent] = useState("");
   const [busy, setBusy] = useState("");
   const [compact, setCompact] = useState<{ rows: number; bytes: number } | null>(null);
+  const [basis, setBasis] = useState<"lexical" | "llm">("llm");
+  const [threshold, setThreshold] = useState(0.85);
+  const [batches, setBatches] = useState<MergeBatch[]>([]);
+  const [batchView, setBatchView] = useState<MergeBatch | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
       const data = await api<{ items: SimilarityGroup[]; total: number }>(
-        "/maintenance/groups?subject_id=" + encodeURIComponent(subject) + "&limit=100",
+        "/maintenance/groups?subject_id=" + encodeURIComponent(subject) + "&limit=200",
       );
       setGroups(data.items);
       setTotal(data.total);
       setSelected((prev) => new Set([...prev].filter((id) => data.items.some((g) => g.id === id))));
+      const history = await api<{ items: MergeBatch[] }>(
+        "/maintenance/batches?subject_id=" + encodeURIComponent(subject) + "&limit=5",
+      );
+      setBatches(history.items);
     } catch (e) {
       setError(e instanceof Error ? e.message : "加载分组失败");
     } finally {
@@ -65,8 +74,14 @@ export function MergeGroupsPanel({
           if (next.status === "done") {
             void load();
             onChanged();
-            const merged = Number((next.result as { merged?: number }).merged ?? 0);
-            setNotice("任务完成：合并 " + merged + " 组。");
+            const result = next.result as { merged?: number; groups?: number; batch_id?: string };
+            if (next.kind === "merge_groups") {
+              setNotice("合并完成：" + String(result.merged ?? 0) + " 组，可查看合并前后对比。");
+              if (result.batch_id) void viewBatch(String(result.batch_id));
+              setSelected(new Set());
+            } else {
+              setNotice("重建完成：生成 " + String(result.groups ?? 0) + " 个分组。");
+            }
           }
         })
         .catch(() => {});
@@ -74,14 +89,29 @@ export function MergeGroupsPanel({
     return () => clearInterval(timer);
   }, [job, load, onChanged]);
 
+  const saveThreshold = (value: number) => {
+    const safe = Math.max(0.3, Math.min(0.99, value));
+    setThreshold(safe);
+    try {
+      window.localStorage.setItem("merge-threshold", String(safe));
+    } catch {
+      /* 忽略隐私模式下的存储失败 */
+    }
+  };
+
   const rebuild = async () => {
     setBusy("rebuild");
     setError("");
+    setNotice("");
     try {
       const created = await api<MaintenanceJob>(
         "/maintenance/groups/rebuild",
         "POST",
-        writeBody({ subject_id: subject }),
+        writeBody({
+          subject_id: subject,
+          basis,
+          group_threshold: threshold,
+        }),
       );
       setJob(created);
     } catch (e) {
@@ -133,7 +163,6 @@ export function MergeGroupsPanel({
       );
       setJob(created);
       setDraft(null);
-      setSelected(new Set());
     } catch (e) {
       setError(e instanceof Error ? e.message : "合并任务创建失败");
     } finally {
@@ -141,16 +170,29 @@ export function MergeGroupsPanel({
     }
   };
 
-  const undo = async (batchId: string) => {
-    if (!window.confirm("确认撤销本次合并？来源记忆会恢复为可用状态。")) return;
+  const viewBatch = async (batchId: string) => {
+    try {
+      setBatchView(await api<MergeBatch>("/maintenance/batches/" + encodeURIComponent(batchId)));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "读取合并结果失败");
+    }
+  };
+
+  const undo = async (batchId: string, groupIds?: string[]) => {
+    const tip = groupIds && groupIds.length
+      ? "确认撤销这一组合并？该组来源记忆会恢复为可用状态。"
+      : "确认撤销本次合并？来源记忆会恢复为可用状态。";
+    if (!window.confirm(tip)) return;
     setBusy("undo");
     try {
-      const result = await api<{ restored: number; skipped: string[] }>(
+      const result = await api<{ restored: number; skipped: string[]; remaining: number }>(
         "/maintenance/merge/undo",
         "POST",
-        writeBody({ subject_id: subject, batch_id: batchId }),
+        writeBody({ subject_id: subject, batch_id: batchId, group_ids: groupIds }),
       );
       setNotice("已撤销，恢复 " + result.restored + " 条记忆。");
+      if (result.remaining > 0) await viewBatch(batchId);
+      else setBatchView(null);
       await load();
       onChanged();
     } catch (e) {
@@ -190,57 +232,102 @@ export function MergeGroupsPanel({
   };
 
   const running = job && (job.status === "queued" || job.status === "running");
-  const batchId = job ? (job.result as { batch_id?: string }).batch_id : undefined;
   const pct = job && job.total > 0 ? Math.round((job.done / job.total) * 100) : 0;
+  const stage = !job
+    ? ""
+    : job.kind === "merge_groups"
+      ? "合并"
+      : basis === "llm"
+        ? "模型判定与建组"
+        : "词法召回与建组";
+  // 高置信=最低相似度达到阈值且不低于 0.9。数字冲突无法在相似度上体现，
+  // 因此不排除选组，但在真正合并前会二次确认并明确告知会保留更可信的一条、可在 7 天内撤销。
+  const confidenceFloor = Math.max(threshold, 0.9);
+  const confidence = groups.filter((g) => g.min_score >= confidenceFloor);
+  const conflictCount = confidence.filter((g) => g.risk.split(",").includes("NUMBER_CONFLICT")).length;
+  const requestMerge = (ids: string[]) => {
+    const conflicts = groups.filter((g) => ids.includes(g.id) && g.risk.split(",").includes("NUMBER_CONFLICT")).length;
+    if (conflicts > 0) {
+      const ok = window.confirm(
+        "已选 " + ids.length + " 组，其中 " + conflicts + " 组存在数字冲突。合并会把多组压成一条，冲突数字只保留更可信的一项并在原因中说明；来源记忆会归档，7 天内可逐组或整批撤销。确认继续？",
+      );
+      if (!ok) return;
+    }
+    void startMerge(ids);
+  };
+  const previewGroup = draft ? groups.find((g) => g.id === draft.group_id) : undefined;
+
+  useEffect(() => {
+    const saved = Number(window.localStorage.getItem("merge-threshold"));
+    if (Number.isFinite(saved) && saved >= 0.3 && saved <= 0.99) setThreshold(saved);
+  }, []);
 
   return (
     <section className="panel padded">
       <h2>相似分组与压缩去重</h2>
       <p className="muted">
-        先用通用模型判断相似关系并分组，你勾选后由模型压缩成一条，旧记忆归档（可在 7 天内撤销）。检索方式不变。
+        先按所选依据生成相似分组，你勾选后由模型压缩成一条，旧记忆归档（7 天内可逐组或整批撤销）。检索方式不变。
       </p>
       <div className="maintenance-row">
+        <label className="inline-field">
+          重建依据
+          <select
+            value={basis}
+            onChange={(e) => setBasis(e.target.value as "lexical" | "llm")}
+            disabled={!!running}
+          >
+            <option value="llm">通用模型（判断是否同一件事）</option>
+            <option value="lexical">词法（按字面，快）</option>
+          </select>
+        </label>
+        <label className="inline-field">
+          合并阈值
+          <input
+            type="number"
+            min={0.3}
+            max={0.99}
+            step={0.01}
+            value={threshold}
+            onChange={(e) => saveThreshold(Number(e.target.value))}
+            disabled={!!running}
+          />
+        </label>
         <button disabled={!!running || busy !== ""} onClick={rebuild}>
-          {busy === "rebuild" ? "创建任务…" : "重建分组"}
+          {busy === "rebuild" ? "创建任务" : "重建分组"}
         </button>
         <button
           disabled={!!running || busy !== "" || selected.size === 0}
-          onClick={() => startMerge([...selected])}
+          onClick={() => requestMerge([...selected])}
         >
           合并已选（{selected.size} 组）
         </button>
-        {groups.length > 0 && (
-          <button
-            disabled={!!running || busy !== ""}
-            onClick={() => setSelected(new Set(groups.filter((g) => !g.risk).slice(0, 20).map((g) => g.id)))}
-          >
-            选中高置信组
-          </button>
+        <button
+          disabled={!!running || busy !== "" || confidence.length === 0}
+          onClick={() => setSelected(new Set(confidence.map((g) => g.id)))}
+        >
+          选中高置信组（{confidence.length}）
+        </button>
+        {running && (
+          <span className="muted">
+            {stage}：{job!.done}/{job!.total}（{pct}%）
+            <button className="link" onClick={() => api("/maintenance/jobs/" + job!.id + "/cancel", "POST", writeBody({}))}>取消</button>
+          </span>
         )}
-        {running && <span className="muted">任务进行中：{job!.done}/{job!.total}（{pct}%）</span>}
       </div>
       {running && (
         <div className="merge-progress"><span style={{ width: pct + "%" }} /></div>
-      )}
-      {job && job.status === "done" && batchId && (
-        <div className="notice">
-          <strong>合并任务完成</strong>
-          <p>
-            合并 {String((job.result as { merged?: number }).merged ?? 0)} 组。
-            <button className="link" disabled={busy !== ""} onClick={() => undo(batchId)}>
-              撤销本次合并
-            </button>
-          </p>
-        </div>
       )}
       {job && job.status === "failed" && (
         <div className="notice warning">任务失败：{job.error || "未知错误"}</div>
       )}
       {error && <div className="notice warning">{error}</div>}
       {notice && <div className="notice">{notice}</div>}
-      <div className="muted">共 {total} 个分组</div>
+      <div className="muted">
+        共 {total} 个分组；当前阈值下可一键选中 {confidence.length} 个高置信组
+        {conflictCount > 0 ? "（其中 " + conflictCount + " 个含数字冲突，合并前会再次确认）" : ""}
+      </div>
       {loading ? (
-        <p className="muted">加载中…</p>
+        <p className="muted">加载中</p>
       ) : groups.length === 0 ? (
         <p className="muted">还没有分组。点「重建分组」按当前记忆生成。</p>
       ) : (
@@ -261,7 +348,7 @@ export function MergeGroupsPanel({
                     }}
                   />
                   <span>
-                    {group.member_count} 条 · 最低分 {group.min_score.toFixed(3)} · {group.status}
+                    {group.member_count} 条 · 最低分 {group.min_score.toFixed(3)} · {group.basis === "llm" ? "模型" : "词法"}
                   </span>
                   {group.risk.split(",").filter(Boolean).map((risk) => (
                     <span className="tag warning" key={risk}>{RISK_LABEL[risk] ?? risk}</span>
@@ -285,6 +372,22 @@ export function MergeGroupsPanel({
           })}
         </div>
       )}
+      {batches.length > 0 && (
+        <div className="merge-batches">
+          <h3>最近合并批次</h3>
+          {batches.map((batch) => (
+            <div className="merge-batch-row" key={batch.id}>
+              <span>
+                {new Date(Number(batch.created_at)).toLocaleString()} · {batch.groups} 组 · {batch.status}
+              </span>
+              <button className="link" onClick={() => viewBatch(batch.id)}>查看合并前后对比</button>
+              {batch.status === "done" && (
+                <button className="link" disabled={busy !== ""} onClick={() => undo(batch.id)}>撤销整批</button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
       <div className="maintenance-row" style={{ marginTop: 16 }}>
         <button disabled={busy !== ""} onClick={previewCompact}>统计可回收空间</button>
         {compact && (
@@ -297,20 +400,70 @@ export function MergeGroupsPanel({
       {draft && (
         <div className="modal-backdrop">
           <div className="modal merge-preview">
-            <h3>合并预览</h3>
-            <p className="muted">确认后会用下面这条记忆替换并归档组内 {groups.find((g) => g.id === draft.group_id)?.member_count ?? ""} 条记忆。</p>
-            {draft.title && <p><strong>{draft.title}</strong></p>}
-            <textarea
-              rows={8}
-              value={draftContent}
-              onChange={(e) => setDraftContent(e.target.value)}
-            />
-            <p className="muted">类型：{draft.type}；关键词：{draft.keywords.join("、") || "无"}；{draft.reason}</p>
+            <h3>合并预览（合并前 vs 合并后）</h3>
+            <div className="compare-cols">
+              <div>
+                <h4>合并前（{previewGroup?.members?.length ?? 0} 条）</h4>
+                {(previewGroup?.members ?? []).map((m) => (
+                  <div className="compare-item" key={m.memory_id}>
+                    <strong>{m.title || "未命名"}</strong>
+                    <span className="muted">（{m.type} · {m.score.toFixed(3)}）</span>
+                    <p>{String(m.content ?? "")}</p>
+                  </div>
+                ))}
+              </div>
+              <div>
+                <h4>合并后（1 条，可编辑）</h4>
+                {draft.title && <p><strong>{draft.title}</strong></p>}
+                <textarea
+                  rows={10}
+                  value={draftContent}
+                  onChange={(e) => setDraftContent(e.target.value)}
+                />
+                <p className="muted">类型：{draft.type}；关键词：{draft.keywords.join("、") || "无"}；{draft.reason}</p>
+              </div>
+            </div>
             <div className="maintenance-row">
               <button disabled={busy !== "" || !draftContent.trim()} onClick={() => startMerge([draft.group_id])}>
-                {busy === "merge" ? "执行中…" : "确认合并"}
+                {busy === "merge" ? "执行中" : "确认合并"}
               </button>
               <button disabled={busy !== ""} onClick={() => setDraft(null)}>取消</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {batchView && (
+        <div className="modal-backdrop">
+          <div className="modal merge-compare">
+            <h3>合并结果对比（可逐组撤回）</h3>
+            {batchView.detail.map((entry) => (
+              <div className="compare-group" key={entry.group_id}>
+                <div className="compare-cols">
+                  <div>
+                    <h4>合并前（{entry.before?.length ?? 0} 条）</h4>
+                    {(entry.before ?? []).map((m) => (
+                      <div className="compare-item" key={m.id}>
+                        <strong>{m.title || "未命名"}</strong>
+                        <span className="muted">（{m.type} · {m.score.toFixed(3)}）</span>
+                        <p>{m.content}</p>
+                      </div>
+                    ))}
+                  </div>
+                  <div>
+                    <h4>合并后（1 条）</h4>
+                    {entry.after?.title && <p><strong>{entry.after.title}</strong></p>}
+                    <p>{entry.after?.content}</p>
+                    {entry.after?.reason && <p className="muted">{entry.after.reason}</p>}
+                  </div>
+                </div>
+                <button className="link" disabled={busy !== ""} onClick={() => undo(batchView.id, [entry.group_id])}>
+                  撤销这一组
+                </button>
+              </div>
+            ))}
+            <div className="maintenance-row">
+              <button disabled={busy !== ""} onClick={() => undo(batchView.id)}>撤销整批</button>
+              <button disabled={busy !== ""} onClick={() => setBatchView(null)}>关闭</button>
             </div>
           </div>
         </div>

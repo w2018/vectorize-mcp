@@ -128,7 +128,7 @@ export function QQBot({
             </label>)}
           </div></fieldset>}
           <label>修改原因<input value={reason} onChange={e => setReason(e.target.value)} required /></label>
-          <footer><span>配置版本 {profile.data.revision} · 当前预设 {profile.data.preset_id || "自定义"}</span><button className="primary" disabled={!reason.trim()} onClick={save}>确认修改…</button></footer>
+          <footer><span>配置版本 {profile.data.revision} · 当前预设 {profile.data.preset_id || "自定义"}</span><button className="primary" disabled={!reason.trim()} onClick={save}>确认修改</button></footer>
         </section>}
         {tab === "presets" && <section className="panel padded">
           <h2>选择起点，再继续编辑</h2>
@@ -140,7 +140,7 @@ export function QQBot({
               <details><summary>查看人设正文</summary><p className="full-content">{preset.persona.content}</p></details>
               <div className="toolbar">
                 <button onClick={() => { setDraft(structuredClone(preset.settings)); setTab("persona"); }}>仅填入表单</button>
-                <button className="primary" onClick={() => setPending({ kind: "preset", preset, writeExamples, reason: "应用预设：" + preset.name, revision: profile.data!.revision, accountName: selectedAccount?.name || "" })}>应用并覆盖…</button>
+                <button className="primary" onClick={() => setPending({ kind: "preset", preset, writeExamples, reason: "应用预设：" + preset.name, revision: profile.data!.revision, accountName: selectedAccount?.name || "" })}>应用并覆盖</button>
               </div>
             </article>)}
             <label className="check"><input type="checkbox" checked={writeExamples} onChange={e => setWriteExamples(e.target.checked)} />同时写入示例人物和概念记忆</label>

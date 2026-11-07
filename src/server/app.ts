@@ -243,7 +243,10 @@ export async function buildApp(options: AppOptions) {
         startMerge: (subjectId, groupIds) => service.startMergeGroupsJob(subjectId, groupIds),
         getJob: (jobId) => service.getMaintenanceJob(jobId),
         cancelJob: (jobId) => service.cancelMaintenanceJob(jobId),
-        undoBatch: (subjectId, batchId) => service.undoMergeBatch(subjectId, batchId),
+        undoBatch: (subjectId, batchId, groupIds) =>
+          service.undoMergeBatch(subjectId, batchId, groupIds),
+        getBatch: (subjectId, batchId) => service.getMergeBatch(subjectId, batchId),
+        listBatches: (subjectId, limit) => service.listMergeBatches(subjectId, limit),
         compactPreview: (subjectId) => service.compactPreview(subjectId),
         compact: (subjectId) => service.compactArchivedVersions(subjectId),
       },

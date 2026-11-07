@@ -352,7 +352,7 @@ export function Accounts({
                               : "选择该凭据；如需复制配置可重新签发"
                           }
                         >
-                          接入…
+                          接入
                         </button>
                         </>
                       )}{" "}
@@ -376,7 +376,7 @@ export function Accounts({
                           }, "")
                         }
                       >
-                        撤销…
+                        撤销
                       </button>
                       {t.status === "revoked" && (
                         <button
@@ -399,7 +399,7 @@ export function Accounts({
                             }, "")
                           }
                         >
-                          删除…
+                          删除
                         </button>
                       )}
                     </td>
@@ -594,14 +594,14 @@ export function Accounts({
                       }, "")
                     }
                   >
-                    重新启用…
+                    重新启用
                   </button>
                   <button
                     className="danger-outline"
                     disabled={action.busy}
                     onClick={() => setDeleting(a)}
                   >
-                    彻底删除…
+                    彻底删除
                   </button>
                 </div>
               </div>
@@ -713,7 +713,7 @@ function DeleteAccountDialog({
   }
   return (
     <Modal title="彻底删除账户" onClose={onClose} locked>
-      {stage === "loading" && <p>正在生成验证码…</p>}
+      {stage === "loading" && <p>正在生成验证码</p>}
       {stage === "error" && (
         <>
           <div className="notice error" role="alert">
@@ -892,7 +892,7 @@ export function Transfer({ subject }: { subject: string }) {
               }, "")
             }
           >
-            检查导入内容…
+            检查导入内容
           </button>
         </section>
       </div>
@@ -1077,7 +1077,7 @@ export function Backups({
                     }, "")
                   }
                 >
-                  预检恢复…
+                  预检恢复
                 </button>
                 <button
                   className="danger"
@@ -1259,7 +1259,7 @@ export function Backups({
                       disabled={action.busy}
                       onClick={() => startRestore(file.name)}
                     >
-                      检测并恢复…
+                      检测并恢复
                     </button>
                     <button
                       className="danger"
@@ -1344,7 +1344,7 @@ export function Backups({
                 {new Date(line.at).toLocaleTimeString("zh-CN")} · {line.text}
               </p>
             ))}
-            {job.status === "running" && <p className="hint">正在处理，请稍候…</p>}
+            {job.status === "running" && <p className="hint">正在处理，请稍候</p>}
             {job.status === "failed" && <p className="log-error">失败：{job.error}</p>}
             {job.status === "done" && (
               <p className="hint">
@@ -1502,24 +1502,12 @@ const fields: {
   },
   {
     key: "similarityBuildThreshold",
-    label: "相似关系构建阈值",
-    help: "重建相似关系时，内容相似度达到此值才生成自动关系；0.3～0.95。",
+    label: "分组召回阈值",
+    help: "生成相似分组时，内容相似度达到此值才进入候选；0.3～0.95。",
     min: 0.3,
     max: 0.95,
     step: 0.01,
     defaultValue: "0.55",
-    advanced: true,
-  },
-  {
-    key: "similarityBasis",
-    label: "相似关系依据",
-    help: "重建相似关系时用词法字面还是通用模型判断。通用模型能认出「换了说法」的同义记忆，但速度取决于模型服务。",
-    defaultValue: "llm",
-    type: "select",
-    options: [
-      { value: "llm", label: "通用模型（判断是否讲同一件事）" },
-      { value: "lexical", label: "词法（字面 bigram，快，认不出同义）" },
-    ],
     advanced: true,
   },
   {
@@ -1583,7 +1571,7 @@ export function Settings({ refresh }: { refresh: number }) {
         <div className="filters">
           <input
             aria-label="搜索设置"
-            placeholder="搜索设置…"
+            placeholder="搜索设置"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -1600,7 +1588,7 @@ export function Settings({ refresh }: { refresh: number }) {
           <div className="notice">
             <strong>检索与模型整理</strong>
             <p>
-              检索始终按词法匹配。通用模型设置已移到「记忆整理」页，只用于判断并重建相似关系。
+              检索始终按词法匹配。通用模型设置已移到「记忆整理」页，只用于判断并生成相似分组。
             </p>
             <p>
               这里的发布只改变规则与统计口径，发布成功即对新请求生效，无需重启。
@@ -1728,10 +1716,10 @@ export function Settings({ refresh }: { refresh: number }) {
                     }, "")
                   }
                 >
-                  预览恢复默认…
+                  预览恢复默认
                 </button>
                 <button className="primary" disabled={action.busy}>
-                  预览修改…
+                  预览修改
                 </button>
               </footer>
             </form>
@@ -1967,7 +1955,7 @@ function CloudDeleteDialog({
   }
   return (
     <Modal title="彻底删除云端备份" onClose={onClose} locked>
-      {stage === "loading" && <p>正在生成验证码…</p>}
+      {stage === "loading" && <p>正在生成验证码</p>}
       {stage === "error" && (
         <>
           <div className="notice error" role="alert">
@@ -2140,7 +2128,7 @@ function SecuritySettings() {
           )}
           <footer>
             <button className="primary" disabled={!ready}>
-              {action.busy ? "正在修改…" : "修改密码"}
+              {action.busy ? "正在修改" : "修改密码"}
             </button>
           </footer>
         </form>

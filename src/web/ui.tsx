@@ -40,7 +40,7 @@ export function State({
     return (
       <div className="empty" role="status">
         <span className="spinner" />
-        正在读取…
+        正在读取
       </div>
     );
   if (error)
@@ -146,7 +146,7 @@ export function PreviewDialog({
               取消
             </button>
             <button className="danger" disabled={busy} onClick={onConfirm}>
-              {busy ? "正在执行…" : "确认执行"}
+              {busy ? "正在执行" : "确认执行"}
             </button>
           </>
         )}
@@ -282,7 +282,7 @@ export function ConfirmDialog({
                 {error}
               </div>
             )}
-            {state === "busy" && <p role="status">正在确认并执行，请稍候…</p>}
+            {state === "busy" && <p role="status">正在确认并执行，请稍候</p>}
           </>
         )}
         <footer>
@@ -309,7 +309,7 @@ export function ConfirmDialog({
                 onClick={() => void (state === "error" ? retry() : execute())}
               >
                 {state === "busy"
-                  ? "确认中…"
+                  ? "确认中"
                   : state === "error"
                     ? onRetry
                       ? "重新预览"

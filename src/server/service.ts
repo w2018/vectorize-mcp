@@ -244,7 +244,7 @@ export class MemoryService implements McpService<Context> {
     if (!embedding)
       throw new DomainError(
         "VALIDATION_ERROR",
-        "未配置可用的向量编码器，无法按语义重建相似关系。请先在「记忆整理」页填写服务地址、模型和维度，或改用词法依据。",
+        "未配置可用的向量编码器，无法按语义生成相似分组。请先在「记忆整理」页填写服务地址、模型和维度，或改用词法依据。",
       );
     if (this.reindexRunning)
       throw new DomainError("OVERLOADED", "向量回填正在进行，请稍后再试。");
@@ -349,6 +349,44 @@ export class MemoryService implements McpService<Context> {
         embedding,
         semanticDisabled,
       );
+    }
+    else if (tool === "memory_similarity_groups") {
+      // 只读：让 Agent 能看到待人工确认的相似分组，但绝不通过 MCP 执行合并。
+      const limit = (input as { limit?: number }).limit ?? 20;
+      const page = (await this.listSimilarityGroups(ctx.subjectId, {
+        status: "proposed",
+        limit,
+      })) as {
+        items: {
+          id: string;
+          member_count: number;
+          min_score: number;
+          risk: string;
+          basis: string;
+          members?: { memory_id: string; title?: string; content?: string; type?: string; score: number }[];
+        }[];
+        total: number;
+      };
+      result = {
+        ok: true,
+        data: {
+          items: page.items.map((g) => ({
+            id: g.id,
+            member_count: g.member_count,
+            min_score: g.min_score,
+            risk: g.risk,
+            basis: g.basis,
+            members: (g.members ?? []).map((m) => ({
+              id: m.memory_id,
+              title: m.title,
+              type: m.type,
+              score: m.score,
+              content: String(m.content ?? "").slice(0, 300),
+            })),
+          })),
+          total: page.total,
+        },
+      };
     }
     else if (
       tool === "memory_get" ||
@@ -772,7 +810,7 @@ export class MemoryService implements McpService<Context> {
   }
   async startRebuildGroupsJob(
     subjectId: string,
-    options: { limit?: number; groupThreshold?: number } = {},
+    options: { limit?: number; groupThreshold?: number; basis?: "lexical" | "llm" } = {},
   ) {
     const job = await this.database.write<MaintenanceJob>(
       "jobs",
@@ -787,9 +825,110 @@ export class MemoryService implements McpService<Context> {
   private async runRebuildGroupsJob(
     jobId: string,
     subjectId: string,
-    options: { limit?: number; groupThreshold?: number },
+    options: { limit?: number; groupThreshold?: number; basis?: "lexical" | "llm" },
   ): Promise<void> {
     try {
+      if (options.basis === "llm") {
+        // 通用模型依据：先词法召回候选对，再由模型逐批判定是否同一件事，最后建组。
+        // 全程后台任务，进度按「判定批次」推进，避免长请求被浏览器/网关掐断。
+        const config = await this.effectiveModelConfig();
+        if (!config.enabled)
+          throw new DomainError(
+            "FEATURE_DISABLED",
+            "尚未配置通用模型；请在「记忆整理」页填写模型服务地址与模型名后再重建。",
+          );
+        const model = this.chatModel(config.baseUrl, config.model);
+        const candidates = await this.database.read<{
+          memories: number;
+          candidates: number;
+          truncated: boolean;
+          pairs: { a: string; b: string; similarity: number; aText: string; bText: string }[];
+        }>("similarity-candidates", "similarityCandidates", subjectId);
+        const batchSize = 10;
+        const total = Math.max(1, Math.ceil(candidates.pairs.length / batchSize));
+        await this.database.write("jobs", "updateMaintenanceJob", jobId, {
+          status: "running",
+          total,
+          done: 0,
+        });
+        const accepted: { a: string; b: string; score: number }[] = [];
+        for (let i = 0, batch = 0; i < candidates.pairs.length; i += batchSize, batch++) {
+          const current = await this.database.read<MaintenanceJob | null>(
+            "jobs",
+            "getMaintenanceJob",
+            jobId,
+          );
+          if (current?.status === "cancelled") return;
+          const slice = candidates.pairs.slice(i, i + batchSize);
+          const listing = slice
+            .map(
+              (pair, index) =>
+                "[" +
+                index +
+                "] A:" +
+                pair.aText.replace(/\s+/g, " ").slice(0, 200) +
+                "\n    B:" +
+                pair.bText.replace(/\s+/g, " ").slice(0, 200),
+            )
+            .join("\n");
+          const prompt =
+            "下面是从记忆库中召回的可能相关的记忆对。请判断每一对是否在讲同一件事或高度相关（例如同一个人、同一个项目、同一偏好）。" +
+            "只输出一个 JSON 数组，不要解释。数组元素形如 {\"i\":序号,\"similar\":true或false,\"score\":0到1的小数}。\n" +
+            listing;
+          try {
+            const reply = await model.chat(
+              [
+                { role: "system", content: "你是严谨的记忆库整理助手，只输出 JSON。" },
+                { role: "user", content: prompt },
+              ],
+              2048,
+            );
+            const first = reply.indexOf("[");
+            const last = reply.lastIndexOf("]");
+            if (first >= 0 && last > first) {
+              const parsed: unknown = JSON.parse(reply.slice(first, last + 1));
+              if (Array.isArray(parsed))
+                for (const verdict of parsed as { i?: unknown; similar?: unknown; score?: unknown }[]) {
+                  const index = Number(verdict.i);
+                  if (!Number.isInteger(index) || index < 0 || index >= slice.length) continue;
+                  if (verdict.similar !== true) continue;
+                  const pair = slice[index]!;
+                  const score = Number(verdict.score);
+                  accepted.push({
+                    a: pair.a,
+                    b: pair.b,
+                    score: Number.isFinite(score) ? Math.max(0, Math.min(1, score)) : 0.8,
+                  });
+                }
+            }
+          } catch {
+            // 单批失败不影响其它批：这一批视为「无法判定」，不生成关系。
+          }
+          await this.database.write("jobs", "updateMaintenanceJob", jobId, {
+            done: batch + 1,
+            total,
+          });
+        }
+        const result = await this.database.write<{
+          memories: number;
+          candidates: number;
+          groups: number;
+          truncated: boolean;
+        }>("groups", "rebuildSimilarityGroups", subjectId, {
+          limit: options.limit,
+          groupThreshold: options.groupThreshold,
+          basis: "llm",
+          model: config.model,
+          pairs: accepted,
+        });
+        await this.database.write("jobs", "updateMaintenanceJob", jobId, {
+          status: "done",
+          done: total,
+          total,
+          result: { ...result, judged: candidates.pairs.length, accepted: accepted.length },
+        });
+        return;
+      }
       await this.database.write("jobs", "updateMaintenanceJob", jobId, {
         status: "running",
         total: 1,
@@ -799,7 +938,11 @@ export class MemoryService implements McpService<Context> {
         candidates: number;
         groups: number;
         truncated: boolean;
-      }>("groups", "rebuildSimilarityGroups", subjectId, options);
+      }>("groups", "rebuildSimilarityGroups", subjectId, {
+        limit: options.limit,
+        groupThreshold: options.groupThreshold,
+        basis: "lexical",
+      });
       await this.database.write("jobs", "updateMaintenanceJob", jobId, {
         status: "done",
         done: 1,
@@ -942,6 +1085,8 @@ export class MemoryService implements McpService<Context> {
       target_id: string;
       new_revision: number;
       archived: { id: string; revision: number }[];
+      before: { id: string; title?: string; content: string; score: number; type?: string }[];
+      after: { title?: string; content: string; type: string; reason: string };
     }[] = [];
     const skipped: { group_id: string; reason: string }[] = [];
     try {
@@ -980,6 +1125,14 @@ export class MemoryService implements McpService<Context> {
               target_id: merged.target_id,
               new_revision: merged.revision,
               archived: merged.archived,
+              before: (group.members ?? []).map((m) => ({
+                id: m.memory_id,
+                title: m.title,
+                content: String(m.content ?? ""),
+                score: m.score,
+                type: m.type,
+              })),
+              after: { title: draft.title, content: draft.content, type: draft.type, reason: draft.reason },
             });
           } catch (error) {
             skipped.push({
@@ -1033,8 +1186,14 @@ export class MemoryService implements McpService<Context> {
       throw new DomainError("JOB_STATUS", "该任务已结束，无法取消。");
     return this.database.write("jobs", "updateMaintenanceJob", jobId, { status: "cancelled" });
   }
-  async undoMergeBatch(subjectId: string, batchId: string) {
-    return this.database.write("undo", "undoMergeBatch", subjectId, batchId);
+  async undoMergeBatch(subjectId: string, batchId: string, groupIds?: string[]) {
+    return this.database.write("undo", "undoMergeBatch", subjectId, batchId, groupIds);
+  }
+  async getMergeBatch(subjectId: string, batchId: string) {
+    return this.database.read("batches", "getMergeBatch", subjectId, batchId);
+  }
+  async listMergeBatches(subjectId: string, limit?: number) {
+    return this.database.read("batches", "listMergeBatches", subjectId, limit);
   }
   async compactPreview(subjectId: string) {
     return this.database.read("compact", "compactPreview", subjectId);

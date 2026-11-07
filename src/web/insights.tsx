@@ -504,7 +504,7 @@ export function GraphView({
                 取消
               </button>
               <button className="primary" disabled={action.busy}>
-                {action.busy ? "正在保存…" : "保存强度"}
+                {action.busy ? "正在保存" : "保存强度"}
               </button>
             </footer>
           </form>
@@ -841,87 +841,20 @@ export function Suggestions({
     body: Record<string, unknown>;
   } | null>(null);
   const [merge, setMerge] = useState<Suggestion | null>(null);
-  const [rebuilding, setRebuilding] = useState(false);
-  const [rebuildResult, setRebuildResult] = useState("");
-  // 重建依据：词法认字面；通用模型判断两条记忆是否讲同一件事。
-  const [basis, setBasis] = useState<"lexical" | "llm">("llm");
   return (
     <>
       <Heading
         eyebrow="MEMORY CARE"
         title="记忆整理"
-        description="配置通用模型并重建相似关系，再逐条处理过期、低权重和冲突的记忆。系统不会自动删除。"
+        description="配置通用模型，生成相似分组并压缩去重，再逐条处理过期、低权重和冲突的记忆。系统不会自动删除。"
       />
       <Feedback error={action.error} notice={action.notice} />
       <section className="panel padded">
         <h2>模型设置</h2>
         <p className="muted">
-          通用模型只用于下面的「重建相似关系」，不改变检索方式——检索始终按词法匹配。未配置时只能按词法重建。
+          通用模型用于「重建分组」时判断两条记忆是否讲同一件事，以及生成合并稿；不改变检索方式。未配置时只能按词法重建。
         </p>
         <EncoderConfigCard />
-      </section>
-      <section className="panel padded">
-        <h2>重建相似关系</h2>
-        <p className="muted">
-          扫描当前账户全部记忆，按所选依据重新生成自动相似关系，用于检索时折叠高度相似记忆。通用模型依据会把候选记忆的正文发送到模型服务判断，可能需要一段时间。不会修改或删除手动关系链。
-        </p>
-        <div className="maintenance-row">
-          <select
-            value={basis}
-            onChange={(e) => setBasis(e.target.value as "lexical" | "llm")}
-            aria-label="相似关系依据"
-          >
-            <option value="llm">通用模型（判断两条记忆是否讲同一件事）</option>
-            <option value="lexical">词法（按字面 bigram，快但认不出同义）</option>
-          </select>
-          <button
-            disabled={rebuilding}
-            onClick={async () => {
-              setRebuilding(true);
-              setRebuildResult("");
-              try {
-                const stats = await api<{
-                  memories: number;
-                  candidates?: number;
-                  judged?: number;
-                  pairs?: number;
-                  similar?: number;
-                  basis?: string;
-                }>("/maintenance/similarity", "POST", writeBody({
-                  subject_id: subject,
-                  neighbors: 5,
-                  basis,
-                }));
-                setRebuildResult(
-                  "已按「" +
-                    (basis === "llm" ? "通用模型" : "词法") +
-                    "」扫描 " +
-                    stats.memories +
-                    " 条记忆，" +
-                    (basis === "llm"
-                      ? "判断 " +
-                        (stats.judged ?? 0) +
-                        " 对候选，关联 " +
-                        (stats.similar ?? 0) +
-                        " 对相似记忆"
-                      : "关联 " + (stats.pairs ?? 0) + " 对相似记忆") +
-                    "。",
-                );
-                dataChanged();
-                setVersion((v) => v + 1);
-              } catch (error) {
-                setRebuildResult(
-                  error instanceof Error ? error.message : "重建失败",
-                );
-              } finally {
-                setRebuilding(false);
-              }
-            }}
-          >
-            {rebuilding ? "正在重建…" : "重建相似关系"}
-          </button>
-          {rebuildResult && <span className="muted">{rebuildResult}</span>}
-        </div>
       </section>
       <MergeGroupsPanel subject={subject} onChanged={() => setVersion((v) => v + 1)} />
       <h2 className="section-title">整理建议</h2>
@@ -968,10 +901,10 @@ export function Suggestions({
                   }, "")
                 }
               >
-                预览归档…
+                预览归档
               </button>
               {s.items.length > 1 && (
-                <button onClick={() => setMerge(s)}>整理合并…</button>
+                <button onClick={() => setMerge(s)}>整理合并</button>
               )}
             </div>
           </section>

@@ -164,7 +164,7 @@ function App() {
               />
             </label>
             <button className="primary" disabled={action.busy}>
-              {action.busy ? "正在登录…" : "进入我的记忆 →"}
+              {action.busy ? "正在登录" : "进入我的记忆 →"}
             </button>
           </form>
           <small>
@@ -288,7 +288,7 @@ function App() {
               disabled={accounts.loading}
             >
               <option value="">
-                {accounts.loading ? "读取中…" : "选择账户"}
+                {accounts.loading ? "读取中" : "选择账户"}
               </option>
               {accounts.data?.items.map((a) => (
                 <option key={a.id} value={a.id}>

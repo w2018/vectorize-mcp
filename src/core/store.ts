@@ -2733,46 +2733,62 @@ export class Store {
   /** 建组：词法召回 → 贪心聚类 → 写 similarity_groups（表 A）。 */
   rebuildSimilarityGroups(
     subjectId: string,
-    options: { limit?: number; groupThreshold?: number; buildThreshold?: number } = {},
+    options: {
+      limit?: number;
+      groupThreshold?: number;
+      buildThreshold?: number;
+      basis?: "lexical" | "llm";
+      model?: string;
+      pairs?: { a: string; b: string; score: number }[];
+    } = {},
   ): { memories: number; candidates: number; groups: number; truncated: boolean } {
     this.adminFor(subjectId);
     const config = this.getConfig();
     const buildThreshold = options.buildThreshold ?? Math.min(config.similarityBuildThreshold, 0.4);
     const groupThreshold = options.groupThreshold ?? 0.85;
     const cap = options.limit ?? 300;
+    const basis = options.basis ?? "lexical";
+    const modelName = options.model ?? "";
     const allowed = new Set(["fact", "preference", "project", "lesson"]);
     const memories = this.all(subjectId).filter((m) => this.effective(m) && allowed.has(m.type));
     const byId = new Map(memories.map((m) => [m.id, m]));
-    const features = new Map<string, Set<string>>();
-    for (const m of memories) features.set(m.id, this.featuresOf(m));
-    const df = new Map<string, number>();
-    for (const set of features.values()) for (const term of set) df.set(term, (df.get(term) ?? 0) + 1);
-    const postings = new Map<string, string[]>();
-    for (const [id, set] of features)
-      for (const term of set) {
-        const list = postings.get(term);
-        if (list) list.push(id);
-        else postings.set(term, [id]);
-      }
-    const pairCounts = new Map<string, number>();
-    for (const [id, set] of features) {
-      const terms = [...set]
-        .filter((term) => (df.get(term) ?? 0) >= 2)
-        .sort((a, b) => (df.get(a) ?? 0) - (df.get(b) ?? 0))
-        .slice(0, 12);
-      for (const term of terms)
-        for (const other of postings.get(term) ?? [])
-          if (other !== id) {
-            const key = id < other ? id + SEP + other : other + SEP + id;
-            pairCounts.set(key, (pairCounts.get(key) ?? 0) + 1);
-          }
-    }
     const pairs: { a: string; b: string; score: number }[] = [];
-    for (const [key, count] of pairCounts) {
-      if (count < 2) continue;
-      const [a, b] = key.split(SEP);
-      const score = Store.jaccard(features.get(a)!, features.get(b)!);
-      if (score >= buildThreshold) pairs.push({ a, b, score });
+    if (options.pairs) {
+      // 通用模型已判定过的候选对：直接用判定结果建组，跳过词法召回。
+      for (const pair of options.pairs)
+        if (byId.has(pair.a) && byId.has(pair.b))
+          pairs.push({ a: pair.a, b: pair.b, score: Math.max(0, Math.min(1, pair.score)) });
+    } else {
+      const features = new Map<string, Set<string>>();
+      for (const m of memories) features.set(m.id, this.featuresOf(m));
+      const df = new Map<string, number>();
+      for (const set of features.values()) for (const term of set) df.set(term, (df.get(term) ?? 0) + 1);
+      const postings = new Map<string, string[]>();
+      for (const [id, set] of features)
+        for (const term of set) {
+          const list = postings.get(term);
+          if (list) list.push(id);
+          else postings.set(term, [id]);
+        }
+      const pairCounts = new Map<string, number>();
+      for (const [id, set] of features) {
+        const terms = [...set]
+          .filter((term) => (df.get(term) ?? 0) >= 2)
+          .sort((a, b) => (df.get(a) ?? 0) - (df.get(b) ?? 0))
+          .slice(0, 12);
+        for (const term of terms)
+          for (const other of postings.get(term) ?? [])
+            if (other !== id) {
+              const key = id < other ? id + SEP + other : other + SEP + id;
+              pairCounts.set(key, (pairCounts.get(key) ?? 0) + 1);
+            }
+      }
+      for (const [key, count] of pairCounts) {
+        if (count < 2) continue;
+        const [a, b] = key.split(SEP);
+        const score = Store.jaccard(features.get(a)!, features.get(b)!);
+        if (score >= buildThreshold) pairs.push({ a, b, score });
+      }
     }
     pairs.sort((x, y) => y.score - x.score);
     const truncated = pairs.length > cap;
@@ -2836,8 +2852,8 @@ export class Store {
           .run(
             gid,
             subjectId,
-            "lexical",
-            "",
+            basis,
+            modelName,
             groupThreshold,
             minScore,
             members.length,
@@ -2954,8 +2970,12 @@ export class Store {
       revision: data.revision,
     };
   }
-  /** 撤销一批合并：来源恢复 active，target 归档（不物理删除）。 */
-  undoMergeBatch(subjectId: string, batchId: string): { restored: number; skipped: string[] } {
+  /** 撤销一批合并（可按 group_ids 只撤其中几组）：来源恢复 active，target 归档（不物理删除）。 */
+  undoMergeBatch(
+    subjectId: string,
+    batchId: string,
+    groupIds?: string[],
+  ): { restored: number; skipped: string[]; remaining: number } {
     this.adminFor(subjectId);
     const batch = this.row(
       "SELECT * FROM merge_batches WHERE id=? AND subject_id=?",
@@ -2973,10 +2993,15 @@ export class Store {
     }[];
     check(batch.status === "done", "BATCH_STATUS");
     check(Date.now() - Number(batch.created_at) <= 7 * 24 * 60 * 60 * 1000, "UNDO_EXPIRED");
+    const filter = groupIds && groupIds.length ? new Set(groupIds) : null;
+    const entries = batchDetail.filter((e) => !filter || filter.has(e.group_id));
+    check(entries.length > 0, "NOT_FOUND");
+    const undone = new Set(entries.map((e) => e.group_id));
+    const remaining = batchDetail.filter((e) => !undone.has(e.group_id));
     let restored = 0;
     const skipped: string[] = [];
     this.tx(() => {
-      for (const raw of batchDetail) {
+      for (const raw of entries) {
         const target = this.row("SELECT data FROM memories WHERE id=?", raw.target_id) as { data: string } | undefined;
         if (target) {
           const memory = JSON.parse(target.data) as Memory;
@@ -3006,10 +3031,38 @@ export class Store {
         }
         this.db.prepare("UPDATE similarity_groups SET status='stale', updated_at=? WHERE id=?").run(Date.now(), raw.group_id);
       }
-      this.db.prepare("UPDATE merge_batches SET status='undone', undone_at=? WHERE id=?").run(Date.now(), batchId);
+      if (remaining.length) {
+        this.db
+          .prepare("UPDATE merge_batches SET detail=?, groups=? WHERE id=?")
+          .run(JSON.stringify(remaining), remaining.length, batchId);
+      } else {
+        this.db.prepare("UPDATE merge_batches SET status='undone', undone_at=? WHERE id=?").run(Date.now(), batchId);
+      }
       return restored;
     });
-    return { restored, skipped };
+    return { restored, skipped, remaining: remaining.length };
+  }
+  /** 读取合并批次详情（含合并前后的原文，用于对比与逐组撤回）。 */
+  getMergeBatch(subjectId: string, batchId: string): MergeBatch | null {
+    this.adminFor(subjectId);
+    const row = this.row(
+      "SELECT * FROM merge_batches WHERE id=? AND subject_id=?",
+      batchId,
+      subjectId,
+    ) as (Omit<MergeBatch, "detail"> & { detail: string }) | undefined;
+    if (!row) return null;
+    return { ...row, detail: JSON.parse(row.detail || "[]") } as unknown as MergeBatch;
+  }
+  listMergeBatches(subjectId: string, limit = 20): { items: MergeBatch[] } {
+    this.adminFor(subjectId);
+    const rows = this.rows(
+      "SELECT * FROM merge_batches WHERE subject_id=? ORDER BY created_at DESC LIMIT ?",
+      subjectId,
+      Math.max(1, Math.min(100, limit)),
+    ) as unknown as (Omit<MergeBatch, "detail"> & { detail: string })[];
+    return {
+      items: rows.map((r) => ({ ...r, detail: JSON.parse(r.detail || "[]") }) as unknown as MergeBatch),
+    };
   }
   /** 已归档记忆的历史版本占用量（空间回收预览）。 */
   compactPreview(subjectId: string): { rows: number; bytes: number } {

@@ -12,7 +12,7 @@ import {
 import { Feedback, PreviewDialog, State, useAction, useResource } from "./ui";
 
 /**
- * 通用模型设置块（默认折叠）：只用于「记忆整理 → 重建相似关系」，
+ * 通用模型设置块（默认折叠）：只用于「记忆整理 → 相似分组」，
  * 让大模型判断两条记忆是否讲同一件事。检索始终是词法匹配，与这里无关。
  */
 export function ModelSettings({
@@ -106,14 +106,14 @@ export function ModelSettings({
       <summary>
         <span className="model-settings-title">模型设置</span>
         <span className="model-settings-hint">
-          {configured ? "已配置 · " + model : "未配置（只能按词法重建相似关系）"}
+          {configured ? "已配置 · " + model : "未配置（只能按词法生成分组）"}
         </span>
       </summary>
       <div className="encoder-settings">
         <p className="encoder-intro">
           {configured
-            ? "已配置通用模型：重建相似关系时，由它判断两条记忆是否讲同一件事。检索方式不变，仍是词法匹配。"
-            : "尚未配置通用模型：重建相似关系只能按词法字面匹配。配置并测试通过后，可让模型判断语义相似；记忆正文会发送到下面填写的服务。"}
+            ? "已配置通用模型：生成相似分组时，由它判断两条记忆是否讲同一件事。它不参与检索排序。"
+            : "尚未配置通用模型：只能按词法字面匹配生成分组。配置并测试通过后，可让模型判断语义相似；记忆正文会发送到下面填写的服务。"}
         </p>
         <div className="settings-grid">
           <label className="setting">
@@ -169,7 +169,7 @@ export function ModelSettings({
                   disabled={busy !== "none" || !keyInput.trim()}
                   onClick={() => saveKey(keyInput)}
                 >
-                  {busy === "key" ? "保存中…" : "保存密钥"}
+                  {busy === "key" ? "保存中" : "保存密钥"}
                 </button>
                 {keyState?.source === "file" && (
                   <button type="button" disabled={busy !== "none"} onClick={() => saveKey("")}>
@@ -197,7 +197,7 @@ export function ModelSettings({
                 onClick={loadModels}
                 title="调用 {baseUrl}/models 拉取该服务可用的模型"
               >
-                {busy === "models" ? "拉取中…" : "拉取模型"}
+                {busy === "models" ? "拉取中" : "拉取模型"}
               </button>
             </span>
             {models.length > 0 && (
@@ -209,7 +209,7 @@ export function ModelSettings({
                   setDraft({ ...draft, llmModel: e.target.value });
                 }}
               >
-                <option value="">从 {models.length} 个可用模型中选择…</option>
+                <option value="">从 {models.length} 个可用模型中选择</option>
                 {models.map((name) => (
                   <option key={name} value={name}>
                     {name}
@@ -223,7 +223,7 @@ export function ModelSettings({
         </div>
         <div className="encoder-actions">
           <button type="button" disabled={busy !== "none"} onClick={test}>
-            {busy === "test" ? "测试中…" : "测试连接"}
+            {busy === "test" ? "测试中" : "测试连接"}
           </button>
           {!configured && (
             <span className="encoder-warn">地址与模型必填；两项全部留空表示不启用模型整理。</span>
@@ -254,7 +254,7 @@ export function ModelSettings({
 
 /**
  * 自包含的模型配置卡：自己加载 /config，只编辑模型服务地址与模型名，预览后发布。
- * 放在「记忆整理」页，与重建相似关系放在一起。
+ * 放在「记忆整理」页，与相似分组放在一起。
  */
 export function EncoderConfigCard() {
   const [version, setVersion] = useState(0);
@@ -303,9 +303,9 @@ export function EncoderConfigCard() {
           >
             <ModelSettings draft={draft} setDraft={setDraft} />
             <footer>
-              <span>发布后只影响「重建相似关系」，不会改变检索方式。</span>
+              <span>发布后只影响「相似分组与合并」，不会改变检索方式。</span>
               <button className="primary" disabled={!dirty || action.busy}>
-                保存模型配置…
+                保存模型配置
               </button>
             </footer>
           </form>

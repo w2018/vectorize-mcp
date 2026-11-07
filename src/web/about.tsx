@@ -200,7 +200,7 @@ export function About() {
           <div className="notice warning">检测失败：{checkError}</div>
         )}
         <div className="notice">
-          当前版本 <strong>{check?.current ?? "…"}</strong>
+          当前版本 <strong>{check?.current ?? "—"}</strong>
           {latest ? (
             <>
               ，最新版本 <strong>{latest.version}</strong>
@@ -223,11 +223,11 @@ export function About() {
         )}
         <footer>
           <button disabled={checking} onClick={() => void runCheck(true)}>
-            {checking ? "检测中…" : "重新检测"}
+            {checking ? "检测中" : "重新检测"}
           </button>
           {check?.has_update && (
             <button className="primary" disabled={busy} onClick={() => void startDownload()}>
-              {busy ? "下载中…" : "下载最新源码"}
+              {busy ? "下载中" : "下载最新源码"}
             </button>
           )}
         </footer>
