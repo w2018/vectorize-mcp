@@ -85,6 +85,8 @@ function check(
 export const estimateBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
 const DEDUP_TTL_MS = 24 * 60 * 60 * 1000;
 const DEDUP_MAX_ROWS = 20000;
+/** 相似对 key 的分隔符：用 NUL 保证不会与 UUID 内容冲突。 */
+const SEP = String.fromCharCode(0);
 function measured<T extends {estimated_tokens:number}>(data:T):T {
   let size=estimateBytes(data);
   while(data.estimated_tokens!==size){data.estimated_tokens=size;size=estimateBytes(data);}
@@ -99,6 +101,8 @@ const defaults: Config = {
   similarityThreshold: 0.92,
   similarityBuildThreshold: 0.55,
   similarityFoldThreshold: 0.8,
+  similarityBasis: "lexical",
+  similaritySemanticThreshold: 0.8,
   importanceFactor: 0.7,
   frequencyFactor: 0.2,
   recencyFactor: 0.1,
@@ -2416,53 +2420,128 @@ export class Store {
       this.saveSimilarity(subjectId, memoryId, item.id, item.similarity);
   }
   /**
-   * 重建账户级相似关系表。先用“稀有 bigram 倒排 + 共享至少 2 个稀有词”生成候选，
-   * 再算精确 Jaccard，避免 5000 条时 2500 万对全量比较。
+   * 重建账户级相似关系表。依据由 config.similarityBasis 决定：
+   * - lexical：稀有 bigram 倒排生成候选 + 精确 Jaccard（默认，纯词法，5000 条约 1 秒）。
+   * - semantic：直接用已回填的向量算余弦，能认出「换了说法」的近义记忆
+   *   （实测：项目-椒图调度 ↔ 项目-椒图画像 0.878，词法完全认不出）。
+   * - hybrid：两者取高，词法命中的保留，向量再补上同义项。
+   * 向量分支是 O(N²) 点积，5000 条 × 1024 维约 11 秒，属于显式维护动作，不在请求路径上。
    */
   rebuildSimilarity(
     subjectId: string,
-    options: { threshold?: number; neighbors?: number } = {},
+    options: {
+      threshold?: number;
+      neighbors?: number;
+      basis?: "lexical" | "semantic" | "hybrid";
+    } = {},
   ) {
     this.adminFor(subjectId);
-    const threshold = options.threshold ?? this.getConfig().similarityBuildThreshold;
+    const config = this.getConfig();
+    const basis = options.basis ?? config.similarityBasis;
+    const threshold = options.threshold ?? config.similarityBuildThreshold;
+    const semanticThreshold = config.similaritySemanticThreshold;
     const neighbors = options.neighbors ?? 5;
     const memories = this.all(subjectId).filter((m) => this.effective(m));
-    const features = new Map<string, Set<string>>();
-    for (const m of memories) features.set(m.id, this.featuresOf(m));
-    const df = new Map<string, number>();
-    for (const set of features.values())
-      for (const term of set) df.set(term, (df.get(term) ?? 0) + 1);
-    const postings = new Map<string, string[]>();
-    for (const [id, set] of features)
-      for (const term of set) {
-        const list = postings.get(term);
-        if (list) list.push(id);
-        else postings.set(term, [id]);
-      }
-    const rareTerms = new Map<string, string[]>();
-    for (const [id, set] of features) {
-      const ordered = [...set]
-        .filter((term) => (df.get(term) ?? 0) >= 2)
-        .sort((a, b) => (df.get(a) ?? 0) - (df.get(b) ?? 0))
-        .slice(0, 12);
-      rareTerms.set(id, ordered);
-    }
-    const pairCounts = new Map<string, number>();
-    for (const [id, terms] of rareTerms)
-      for (const term of terms)
-        for (const other of postings.get(term) ?? [])
-          if (other !== id) {
-            const key = id < other ? id + '\u0000' + other : other + '\u0000' + id;
-            pairCounts.set(key, (pairCounts.get(key) ?? 0) + 1);
-          }
     const near = new Map<string, { id: string; similarity: number }[]>();
-    for (const [key, count] of pairCounts) {
-      if (count < 2) continue;
-      const [a, b] = key.split('\u0000');
-      const similarity = Store.jaccard(features.get(a)!, features.get(b)!);
-      if (similarity < threshold) continue;
+    const push = (a: string, b: string, similarity: number) => {
       (near.get(a) ?? near.set(a, []).get(a)!).push({ id: b, similarity });
       (near.get(b) ?? near.set(b, []).get(b)!).push({ id: a, similarity });
+    };
+    let candidateCount = 0;
+    if (basis !== "semantic") {
+      const features = new Map<string, Set<string>>();
+      for (const m of memories) features.set(m.id, this.featuresOf(m));
+      const df = new Map<string, number>();
+      for (const set of features.values())
+        for (const term of set) df.set(term, (df.get(term) ?? 0) + 1);
+      const postings = new Map<string, string[]>();
+      for (const [id, set] of features)
+        for (const term of set) {
+          const list = postings.get(term);
+          if (list) list.push(id);
+          else postings.set(term, [id]);
+        }
+      const rareTerms = new Map<string, string[]>();
+      for (const [id, set] of features) {
+        const ordered = [...set]
+          .filter((term) => (df.get(term) ?? 0) >= 2)
+          .sort((a, b) => (df.get(a) ?? 0) - (df.get(b) ?? 0))
+          .slice(0, 12);
+        rareTerms.set(id, ordered);
+      }
+      const pairCounts = new Map<string, number>();
+      for (const [id, terms] of rareTerms)
+        for (const term of terms)
+          for (const other of postings.get(term) ?? [])
+            if (other !== id) {
+              const key = id < other ? id + SEP + other : other + SEP + id;
+              pairCounts.set(key, (pairCounts.get(key) ?? 0) + 1);
+            }
+      candidateCount = pairCounts.size;
+      for (const [key, count] of pairCounts) {
+        if (count < 2) continue;
+        const [a, b] = key.split(SEP);
+        const similarity = Store.jaccard(features.get(a)!, features.get(b)!);
+        if (similarity < threshold) continue;
+        push(a, b, similarity);
+      }
+    }
+    if (basis !== "lexical") {
+      // 向量按「当前生效的模型身份」取用：同账户、同 revision、出现次数最多的模型。
+      const modelRow = this.row(
+        "SELECT v.model AS model, count(*) AS c FROM vectors v JOIN memories m ON m.id=v.memory_id " +
+          "WHERE m.subject_id=? AND m.revision=v.revision GROUP BY v.model ORDER BY c DESC LIMIT 1",
+        subjectId,
+      );
+      const model = modelRow ? String(modelRow.model) : "";
+      const vectorRows = model
+        ? this.rows(
+            "SELECT v.memory_id AS id, v.vector AS vector FROM vectors v JOIN memories m ON m.id=v.memory_id " +
+              "WHERE m.subject_id=? AND m.revision=v.revision AND v.model=?",
+            subjectId,
+            model,
+          )
+        : [];
+      const vectors: { id: string; vec: Float32Array }[] = [];
+      for (const row of vectorRows) {
+        const buf = row.vector as Buffer;
+        if (!buf || buf.byteLength < 4) continue;
+        const vec = new Float32Array(
+          buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+        );
+        let sum = 0;
+        for (let i = 0; i < vec.length; i++) sum += vec[i] * vec[i];
+        const norm = Math.sqrt(sum);
+        if (!norm) continue;
+        for (let i = 0; i < vec.length; i++) vec[i] /= norm;
+        vectors.push({ id: String(row.id), vec });
+      }
+      // 只在已加载向量之间比较；余弦相似度映射到 0～1 与 Jaccard 同量纲。
+      for (let i = 0; i < vectors.length; i++) {
+        const a = vectors[i]!;
+        for (let j = i + 1; j < vectors.length; j++) {
+          const b = vectors[j]!;
+          if (a.vec.length !== b.vec.length) continue;
+          let dot = 0;
+          for (let k = 0; k < a.vec.length; k++) dot += a.vec[k]! * b.vec[k]!;
+          const similarity = (1 + Math.max(-1, Math.min(1, dot))) / 2;
+          if (similarity < semanticThreshold) continue;
+          if (basis === "hybrid") {
+            // hybrid 取两者较高者：词法已命中的不降级，向量补充同义项。
+            const existing = (near.get(a.id) ?? []).find((x) => x.id === b.id);
+            if (existing) {
+              if (similarity > existing.similarity) {
+                existing.similarity = similarity;
+                const mirror = (near.get(b.id) ?? []).find((x) => x.id === a.id);
+                if (mirror) mirror.similarity = similarity;
+              }
+              continue;
+            }
+          }
+          push(a.id, b.id, similarity);
+        }
+      }
+      candidateCount += vectors.length;
     }
     const pairTotal = Math.floor(
       [...near.values()].reduce(
@@ -2470,6 +2549,8 @@ export class Store {
         0,
       ) / 2,
     );
+    const basisLabel = basis === "semantic" ? "semantic" : basis === "hybrid" ? "hybrid" : "lexical";
+    const algorithmVersion = "similarity-" + basisLabel + "-v1";
     this.tx(() => {
       this.db
         .prepare(
@@ -2479,14 +2560,15 @@ export class Store {
       for (const [id, list] of near) {
         list.sort((x, y) => y.similarity - x.similarity);
         for (const item of list.slice(0, neighbors))
-          this.saveSimilarity(subjectId, id, item.id, item.similarity);
+          this.saveSimilarity(subjectId, id, item.id, item.similarity, basisLabel, algorithmVersion);
       }
       return pairTotal;
     });
     return {
       memories: memories.length,
-      candidates: pairCounts.size,
+      candidates: candidateCount,
       pairs: pairTotal,
+      basis: basisLabel,
     };
   }
   /** 读取某条记忆的相似关系（供 Web 详情展示），按相似度降序，最多 20 条。 */
@@ -3298,6 +3380,7 @@ export class Store {
     for (const k of [
       "similarityBuildThreshold",
       "similarityFoldThreshold",
+      "similaritySemanticThreshold",
       "lexicalThreshold",
       "semanticThreshold",
       "similarityThreshold",
@@ -3307,6 +3390,12 @@ export class Store {
     ] as const)
       check(Number.isFinite(config[k]) && config[k] >= 0 && config[k] <= 1);
     check(config.similarityBuildThreshold>=0.3 && config.similarityBuildThreshold<=0.95 && config.similarityFoldThreshold>=0.5 && config.similarityFoldThreshold<=1);
+    check(["lexical","semantic","hybrid"].includes(config.similarityBasis));
+    check(
+      config.similaritySemanticThreshold >= 0.5 && config.similaritySemanticThreshold <= 0.99,
+      "VALIDATION_ERROR",
+      "「向量相似度阈值」需在 0.5～0.99 之间。",
+    );
     check(
       Math.abs(
         config.importanceFactor +

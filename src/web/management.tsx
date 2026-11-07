@@ -1749,7 +1749,8 @@ const fields: {
   step?: number;
   defaultValue: string;
   advanced?: boolean;
-  type?: "text" | "boolean";
+  type?: "text" | "boolean" | "select";
+  options?: { value: string; label: string }[];
 }[] = [
   {
     key: "defaultLimit",
@@ -1866,6 +1867,29 @@ const fields: {
     max: 0.95,
     step: 0.01,
     defaultValue: "0.55",
+    advanced: true,
+  },
+  {
+    key: "similarityBasis",
+    label: "相似关系依据",
+    help: "重建相似关系时用词法字面还是向量语义。语义能认出「换了说法」的同义记忆，但 5000 条约需 11 秒。",
+    defaultValue: "lexical",
+    type: "select",
+    options: [
+      { value: "lexical", label: "词法（字面 bigram，快，认不出同义）" },
+      { value: "semantic", label: "语义（向量余弦，认同义）" },
+      { value: "hybrid", label: "混合（两者取较高者）" },
+    ],
+    advanced: true,
+  },
+  {
+    key: "similaritySemanticThreshold",
+    label: "向量相似度阈值",
+    help: "语义/混合模式下，余弦相似度达到此值才建立自动关系；0.5～0.99。",
+    min: 0.5,
+    max: 0.99,
+    step: 0.01,
+    defaultValue: "0.8",
     advanced: true,
   },
   {
@@ -2013,7 +2037,20 @@ export function Settings({ refresh }: { refresh: number }) {
                   .map((f) => (
                     <label className="setting" key={f.key}>
                       <span>{f.label}</span>
-                      {f.type === "boolean" ? (
+                      {f.type === "select" ? (
+                        <select
+                          value={String(draft[f.key] ?? "")}
+                          onChange={(e) =>
+                            setDraft({ ...draft, [f.key]: e.target.value })
+                          }
+                        >
+                          {(f.options ?? []).map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      ) : f.type === "boolean" ? (
                         <select
                           value={String(draft[f.key] ?? false)}
                           onChange={(e) =>

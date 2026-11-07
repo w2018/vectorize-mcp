@@ -639,8 +639,15 @@ export async function registerAdmin(
       if (!Number.isFinite(threshold) || threshold < 0.3 || threshold > 0.95)
         throw new DomainError("VALIDATION_ERROR");
     }
+    let basis: "lexical" | "semantic" | "hybrid" | undefined;
+    if (b.basis !== undefined && b.basis !== "") {
+      if (b.basis !== "lexical" && b.basis !== "semantic" && b.basis !== "hybrid")
+        throw new DomainError("VALIDATION_ERROR", "相似关系依据只能是 lexical / semantic / hybrid。");
+      basis = b.basis;
+    }
     return write("rebuildSimilarity", subject(b), {
       threshold,
+      basis,
       neighbors:
         b.neighbors === undefined ? undefined : integer(b.neighbors, 5, 20),
     });
@@ -681,6 +688,10 @@ export async function registerAdmin(
       ctx = await read<Context>("adminFor", id);
     const { subject_id, ...input } = b;
     input.request_id = requestId(input.request_id);
+    // 写入来源兜底：管理端新建记忆时没有来源字段，统一标注为 web-admin，
+    // 避免详情页「来源记录」为空数组（v0.5.6 之前所有管理端写入都是空的）。
+    if (method === "add" && input.source === undefined)
+      input.source = { platform: "web-admin" };
     if (method === "update") object(input.patch);
     if (method === "archive") versionRefs(input.items);
     if (method === "merge") {

@@ -7,6 +7,41 @@ import { CapacityError } from "../server/scheduler.js";
 
 const nonIdempotentTools = new Set<ToolName>(["memory_search", "memory_get", "memory_config_get", "memory_bootstrap"]);
 
+/** 写入类工具：调用方没给来源时，用 MCP 握手声明的客户端名兜底，避免「来源记录」为空。 */
+const sourceTools = new Set<ToolName>(["memory_add", "memory_update", "memory_merge"]);
+
+/**
+ * 每次 HTTP 请求都会新建 McpServer（无状态传输），tools/call 拿不到同一次握手的 clientInfo，
+ * 因此按凭据缓存 initialize 声明的客户端名，供后续写入兜底来源。上限 256，超出丢弃最早的一条。
+ */
+const clientNames = new Map<string, string>();
+const CLIENT_NAME_LIMIT = 256;
+
+function rememberClient(token: string, parsedBody: unknown): void {
+  const message = parsedBody as
+    | { method?: unknown; params?: { clientInfo?: { name?: unknown } } }
+    | undefined;
+  if (!message || message.method !== "initialize") return;
+  const name = message.params?.clientInfo?.name;
+  if (typeof name !== "string" || !name.trim()) return;
+  clientNames.delete(token);
+  clientNames.set(token, name.trim().slice(0, 128));
+  while (clientNames.size > CLIENT_NAME_LIMIT) {
+    const oldest = clientNames.keys().next().value;
+    if (oldest === undefined) break;
+    clientNames.delete(oldest);
+  }
+}
+
+function withSource(
+  name: ToolName,
+  args: Record<string, unknown>,
+  clientName: string | undefined,
+): Record<string, unknown> {
+  if (!sourceTools.has(name) || args.source !== undefined) return args;
+  return { ...args, source: { platform: clientName || "mcp" } };
+}
+
 export interface McpService<C> {
   authenticate(token: string): Promise<C>;
   call(
@@ -92,6 +127,8 @@ export function createMcpHandler<C>(service: McpService<C>) {
       authorizationFailure(res, error);
       return;
     }
+    rememberClient(match[1], parsedBody);
+    const clientName = clientNames.get(match[1]);
     // No reusable session capability exists: credentials bind each request's server closure.
     const server = new McpServer(
       { name: "vectorize-mcp", version: APP_VERSION },
@@ -147,7 +184,7 @@ export function createMcpHandler<C>(service: McpService<C>) {
             const result = await service.call(
               context,
               name,
-              args as Record<string, unknown>,
+              withSource(name, args, clientName),
             );
             const isError =
               !!result &&

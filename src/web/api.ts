@@ -229,6 +229,8 @@ export interface Config {
   similarityThreshold: number;
   similarityBuildThreshold: number;
   similarityFoldThreshold: number;
+  similarityBasis: "lexical" | "semantic" | "hybrid";
+  similaritySemanticThreshold: number;
   embeddingModel: string;
   embeddingBaseUrl: string;
   embeddingDimension: number;

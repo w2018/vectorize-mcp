@@ -22,6 +22,48 @@ import {
   useResource,
   weightText,
 } from "./ui";
+/** 来源记录的结构化展示：调用方未提供来源时明确说明，而不是显示一个空数组。 */
+type SourceRef = {
+  platform?: string;
+  agent?: string;
+  conversation_id?: string;
+  message_id?: string;
+  reference?: string;
+};
+
+const SOURCE_LABELS: [keyof SourceRef, string][] = [
+  ["platform", "平台"],
+  ["agent", "Agent"],
+  ["conversation_id", "会话"],
+  ["message_id", "消息"],
+  ["reference", "引用"],
+];
+
+function SourceList({ sources }: { sources: SourceRef[] }) {
+  const rows = sources.filter((s) => s && typeof s === "object");
+  if (rows.length === 0)
+    return (
+      <p className="source-empty">
+        未记录来源：该条记忆写入时没有携带来源信息（v0.5.6 之前的写入均如此）。
+        新写入会自动带上调用方声明的平台，也可在写入时显式传 source。
+      </p>
+    );
+  return (
+    <ul className="source-list">
+      {rows.map((source, index) => (
+        <li key={index}>
+          {SOURCE_LABELS.filter(([key]) => source[key]).map(([key, label]) => (
+            <span className="source-item" key={key}>
+              <span className="source-key">{label}</span>
+              <span className="source-value">{String(source[key])}</span>
+            </span>
+          ))}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export function MemoryEditor({
   subject,
   accounts,
@@ -635,15 +677,11 @@ export function Memories({
               </ul>
             </div>
           )}
-          <details>
+          <details open>
             <summary>来源记录</summary>
-            <pre>
-              {JSON.stringify(
-                detail.sources || detail.provenance || [],
-                null,
-                2,
-              )}
-            </pre>
+            <SourceList
+              sources={(detail.sources || detail.provenance || []) as SourceRef[]}
+            />
           </details>
           <footer>
             <button

@@ -644,6 +644,8 @@ export function Stats({
   const config = useResource<Config>("/config", refresh);
   const [rebuilding, setRebuilding] = useState(false);
   const [rebuildResult, setRebuildResult] = useState<string>("");
+  // 重建依据：词法认字面、语义认同义（换说法也能关联），hybrid 取两者较高者。
+  const [basis, setBasis] = useState<"lexical" | "semantic" | "hybrid">("semantic");
   const d = data.data;
   // 编码器「未配置」与「配置不完整」要区分：后者会让每次编码失败并静默降级，
   // 用户只看到词法结果却以为语义已开启。
@@ -711,19 +713,34 @@ export function Stats({
         </select>
       </Heading>
       <div className="maintenance-row">
+        <select
+          value={basis}
+          onChange={(e) => setBasis(e.target.value as "lexical" | "semantic" | "hybrid")}
+          aria-label="相似关系依据"
+        >
+          <option value="semantic">语义（按向量，识别换了说法的同义记忆）</option>
+          <option value="hybrid">混合（词法与语义取较高者）</option>
+          <option value="lexical">词法（按字面 bigram，快但认不出同义）</option>
+        </select>
         <button
           disabled={rebuilding}
           onClick={async () => {
             setRebuilding(true);
             setRebuildResult("");
             try {
-              const stats = await api<{ memories: number; pairs: number }>(
+              const stats = await api<{ memories: number; pairs: number; basis?: string }>(
                 "/maintenance/similarity",
                 "POST",
-                writeBody({ subject_id: subject, neighbors: 5 }),
+                writeBody({ subject_id: subject, neighbors: 5, basis }),
               );
               setRebuildResult(
-                "已扫描 " + stats.memories + " 条记忆，关联 " + stats.pairs + " 对相似记忆。",
+                "已按「" +
+                  (basis === "semantic" ? "语义" : basis === "hybrid" ? "混合" : "词法") +
+                  "」扫描 " +
+                  stats.memories +
+                  " 条记忆，关联 " +
+                  stats.pairs +
+                  " 对相似记忆。",
               );
               dataChanged();
             } catch (error) {
