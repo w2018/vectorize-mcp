@@ -36,6 +36,7 @@ export function MergeGroupsPanel({
   const [compact, setCompact] = useState<{ rows: number; bytes: number } | null>(null);
   const [basis, setBasis] = useState<"lexical" | "llm">("llm");
   const [threshold, setThreshold] = useState(0.85);
+  const [thresholdText, setThresholdText] = useState("0.85");
   const [batches, setBatches] = useState<MergeBatch[]>([]);
   const [batchView, setBatchView] = useState<MergeBatch | null>(null);
 
@@ -92,6 +93,7 @@ export function MergeGroupsPanel({
   const saveThreshold = (value: number) => {
     const safe = Math.max(0.3, Math.min(0.99, value));
     setThreshold(safe);
+    setThresholdText(String(safe));
     try {
       window.localStorage.setItem("merge-threshold", String(safe));
     } catch {
@@ -259,7 +261,10 @@ export function MergeGroupsPanel({
 
   useEffect(() => {
     const saved = Number(window.localStorage.getItem("merge-threshold"));
-    if (Number.isFinite(saved) && saved >= 0.3 && saved <= 0.99) setThreshold(saved);
+    if (Number.isFinite(saved) && saved >= 0.3 && saved <= 0.99) {
+      setThreshold(saved);
+      setThresholdText(String(saved));
+    }
   }, []);
 
   return (
@@ -287,8 +292,21 @@ export function MergeGroupsPanel({
             min={0.3}
             max={0.99}
             step={0.01}
-            value={threshold}
-            onChange={(e) => saveThreshold(Number(e.target.value))}
+            value={thresholdText}
+            onChange={(e) => {
+              const raw = e.target.value;
+              setThresholdText(raw);
+              const next = Number(raw);
+              if (raw.trim() !== "" && Number.isFinite(next) && next >= 0.3 && next <= 0.99) {
+                setThreshold(next);
+                try {
+                  window.localStorage.setItem("merge-threshold", String(next));
+                } catch {
+                  /* 忽略隐私模式下的存储失败 */
+                }
+              }
+            }}
+            onBlur={() => setThresholdText(String(threshold))}
             disabled={!!running}
           />
         </label>

@@ -1894,3 +1894,21 @@ button,
   html[data-mobile="true"] .settings-grid { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   html[data-mobile="true"] .compare-cols { grid-template-columns: 1fr; }
 }
+
+/* v0.6.3 手机端细节：避免标签被挤成竖排、操作按钮被挤到文本右侧 */
+html[data-mobile="true"] .account-select { white-space: nowrap; gap: 4px; }
+html[data-mobile="true"] .account-select select { flex: 1 1 auto; width: auto; min-width: 0; }
+html[data-mobile="true"] .filters .check { flex: 0 0 auto; flex-direction: row; align-items: center; gap: 8px; width: auto; }
+html[data-mobile="true"] .filters .check input { width: 16px; height: 16px; flex: 0 0 auto; }
+html[data-mobile="true"] .encoder-actions { flex-direction: column; align-items: stretch; }
+html[data-mobile="true"] .encoder-actions button { width: 100%; }
+html[data-mobile="true"] .panel footer:not(.page-foot) { flex-direction: column; align-items: stretch; gap: 8px; }
+html[data-mobile="true"] .panel footer:not(.page-foot) > span { margin-right: 0; }
+html[data-mobile="true"] .panel footer:not(.page-foot) button { width: 100%; }
+
+html[data-mobile="true"] .maintenance-row { flex-wrap: wrap; overflow-x: visible; white-space: normal; gap: 10px; align-items: stretch; }
+html[data-mobile="true"] .maintenance-row > * { flex: 1 1 auto; max-width: 100%; }
+html[data-mobile="true"] .maintenance-row .inline-field { flex: 1 1 100%; min-width: 0; align-items: stretch; text-align: left; }
+html[data-mobile="true"] .maintenance-row .inline-field select,
+html[data-mobile="true"] .maintenance-row .inline-field input { width: 100%; min-width: 0; }
+html[data-mobile="true"] .maintenance-row button { width: 100%; }
