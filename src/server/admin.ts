@@ -173,6 +173,20 @@ export async function registerAdmin(
       truncated: boolean;
       basis: "llm";
     }>;
+    /** v0.6.2 相似分组 / 压缩去重合并 / 空间回收。 */
+    maintenance?: {
+      listGroups(subjectId: string, filters: { status?: string; limit?: number; offset?: number }): Promise<unknown>;
+      getGroup(subjectId: string, id: string): Promise<unknown>;
+      ignoreGroups(subjectId: string, ids: string[]): Promise<unknown>;
+      rebuildGroups(subjectId: string, options: { limit?: number; groupThreshold?: number }): Promise<unknown>;
+      previewMerge(subjectId: string, groupId: string): Promise<unknown>;
+      startMerge(subjectId: string, groupIds: string[]): Promise<unknown>;
+      getJob(jobId: string): Promise<unknown>;
+      cancelJob(jobId: string): Promise<unknown>;
+      undoBatch(subjectId: string, batchId: string): Promise<unknown>;
+      compactPreview(subjectId: string): Promise<unknown>;
+      compact(subjectId: string): Promise<unknown>;
+    };
   },
 ): Promise<void> {
   const installRoot = resolve(options.updateRoot ?? process.cwd());
@@ -651,6 +665,87 @@ export async function registerAdmin(
         b.neighbors === undefined ? undefined : integer(b.neighbors, 5, 20),
     })) as Record<string, unknown>;
     return { ...rebuilt, basis: "lexical" as const };
+  });
+  // ---- v0.6.2 相似分组与压缩去重合并 ----
+  route("POST", "/maintenance/groups/rebuild", async (req) => {
+    const m = options.maintenance;
+    if (!m) throw new DomainError("FEATURE_DISABLED");
+    const b = body(req);
+    return m.rebuildGroups(subject(b), {
+      limit: b.limit === undefined ? undefined : integer(b.limit, 10, 2000),
+      groupThreshold:
+        b.group_threshold === undefined ? undefined : Number(b.group_threshold),
+    });
+  });
+  route("GET", "/maintenance/groups", async (req) => {
+    const m = options.maintenance;
+    if (!m) throw new DomainError("FEATURE_DISABLED");
+    const q = query(req);
+    const status = typeof q.status === "string" && q.status ? q.status : undefined;
+    return m.listGroups(subject(q), {
+      status,
+      limit: integer(q.limit, 20, 200),
+      offset: offset(q.cursor),
+    });
+  });
+  route("GET", "/maintenance/groups/:id", async (req) => {
+    const m = options.maintenance;
+    if (!m) throw new DomainError("FEATURE_DISABLED");
+    return m.getGroup(subject(query(req)), param(req));
+  });
+  route("POST", "/maintenance/groups/ignore", async (req) => {
+    const m = options.maintenance;
+    if (!m) throw new DomainError("FEATURE_DISABLED");
+    const b = body(req);
+    const ids = Array.isArray(b.group_ids)
+      ? b.group_ids.filter((id: unknown): id is string => typeof id === "string")
+      : [];
+    return m.ignoreGroups(subject(b), ids);
+  });
+  route("POST", "/maintenance/merge/preview", async (req) => {
+    const m = options.maintenance;
+    if (!m) throw new DomainError("FEATURE_DISABLED");
+    const b = body(req);
+    return m.previewMerge(subject(b), text(b.group_id));
+  });
+  route("POST", "/maintenance/merge", async (req) => {
+    const m = options.maintenance;
+    if (!m) throw new DomainError("FEATURE_DISABLED");
+    const b = body(req);
+    const ids = Array.isArray(b.group_ids)
+      ? b.group_ids.filter((id: unknown): id is string => typeof id === "string")
+      : [];
+    if (!ids.length) throw new DomainError("VALIDATION_ERROR", "请至少选择一个分组。");
+    return m.startMerge(subject(b), ids);
+  });
+  route("GET", "/maintenance/jobs/:id", async (req) => {
+    const m = options.maintenance;
+    if (!m) throw new DomainError("FEATURE_DISABLED");
+    return m.getJob(param(req));
+  });
+  route("POST", "/maintenance/jobs/:id/cancel", async (req) => {
+    const m = options.maintenance;
+    if (!m) throw new DomainError("FEATURE_DISABLED");
+    return m.cancelJob(param(req));
+  });
+  route("POST", "/maintenance/merge/undo", async (req) => {
+    const m = options.maintenance;
+    if (!m) throw new DomainError("FEATURE_DISABLED");
+    const b = body(req);
+    return m.undoBatch(subject(b), text(b.batch_id));
+  });
+  route("POST", "/maintenance/compact/preview", async (req) => {
+    const m = options.maintenance;
+    if (!m) throw new DomainError("FEATURE_DISABLED");
+    return m.compactPreview(subject(body(req)));
+  });
+  route("POST", "/maintenance/compact", async (req) => {
+    const m = options.maintenance;
+    if (!m) throw new DomainError("FEATURE_DISABLED");
+    const b = body(req);
+    if (b.confirm !== true)
+      throw new DomainError("VALIDATION_ERROR", "空间回收需要明确确认。");
+    return m.compact(subject(b));
   });
   for (const path of ["/memories", "/profiles"])
     route("GET", path, async (req) => {

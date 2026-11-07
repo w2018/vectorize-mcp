@@ -244,6 +244,52 @@ export interface Config {
   llmModel: string;
   [key: string]: unknown;
 }
+export interface SimilarityGroupMember {
+  memory_id: string;
+  revision: number;
+  score: number;
+  role: string;
+  title?: string;
+  content?: string;
+  type?: string;
+  importance?: number;
+  status?: string;
+}
+export interface SimilarityGroup {
+  id: string;
+  subject_id: string;
+  basis: string;
+  model: string;
+  threshold: number;
+  min_score: number;
+  member_count: number;
+  state_token: string;
+  status: string;
+  risk: string;
+  created_at: number;
+  updated_at: number;
+  members?: SimilarityGroupMember[];
+}
+export interface MaintenanceJob {
+  id: string;
+  subject_id: string;
+  kind: string;
+  status: "queued" | "running" | "done" | "failed" | "cancelled" | "interrupted";
+  total: number;
+  done: number;
+  options: Record<string, unknown>;
+  result: Record<string, unknown>;
+  error: string;
+}
+export interface MergeDraft {
+  group_id: string;
+  title?: string;
+  content: string;
+  type: string;
+  keywords: string[];
+  importance?: number;
+  reason: string;
+}
 export interface Backup {
   id: string;
   created_at: number;

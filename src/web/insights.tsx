@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Graph3D } from "./graph3d";
 import { EncoderConfigCard } from "./encoder-settings";
+import { MergeGroupsPanel } from "./merge-groups";
 import {
   api,
   dataChanged,
@@ -922,6 +923,7 @@ export function Suggestions({
           {rebuildResult && <span className="muted">{rebuildResult}</span>}
         </div>
       </section>
+      <MergeGroupsPanel subject={subject} onChanged={() => setVersion((v) => v + 1)} />
       <h2 className="section-title">整理建议</h2>
       <State
         loading={data.loading}

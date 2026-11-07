@@ -361,6 +361,59 @@ export interface PreparedSearch {
   budgetExhausted: boolean;
   estimatedTokens: number;
 }
+export interface SimilarityGroupMember {
+  memory_id: string;
+  revision: number;
+  score: number;
+  role: string;
+  title?: string;
+  content?: string;
+  type?: string;
+  importance?: number;
+  status?: string;
+}
+
+export interface SimilarityGroup {
+  id: string;
+  subject_id: string;
+  basis: "lexical" | "llm";
+  model: string;
+  threshold: number;
+  min_score: number;
+  member_count: number;
+  state_token: string;
+  status: "proposed" | "ignored" | "merging" | "merged" | "failed" | "stale";
+  risk: string;
+  created_at: number;
+  updated_at: number;
+  members?: SimilarityGroupMember[];
+}
+
+export interface MaintenanceJob {
+  id: string;
+  subject_id: string;
+  kind: "rebuild_groups" | "merge_groups";
+  status: "queued" | "running" | "done" | "failed" | "cancelled" | "interrupted";
+  total: number;
+  done: number;
+  options: Record<string, unknown>;
+  result: Record<string, unknown>;
+  error: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface MergeBatch {
+  id: string;
+  subject_id: string;
+  job_id: string;
+  status: "done" | "undone";
+  groups: number;
+  detail: unknown[];
+  created_at: number;
+  undone_at: number | null;
+}
+
 export class DomainError extends Error {
   constructor(
     public code: string,

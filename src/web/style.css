@@ -1842,3 +1842,19 @@ html[data-mobile="true"] .login-card h1 {
 .model-settings-details[open] > summary::before { content: "▾"; }
 .model-settings-title { font-weight: 600; }
 .model-settings-hint { font-size: 12px; opacity: 0.65; }
+
+/* v0.6.2 相似分组与压缩去重 */
+.merge-groups { display: grid; gap: 12px; margin-top: 12px; }
+.merge-group { border: 1px solid var(--border, #d8d8d8); border-radius: 8px; padding: 10px 12px; }
+.merge-group.selected { border-color: #2f7cf6; box-shadow: 0 0 0 1px #2f7cf6 inset; }
+.merge-group-head { display: flex; gap: 8px; align-items: center; font-weight: 600; }
+.merge-members { margin: 8px 0; padding-left: 18px; }
+.merge-members li { margin-bottom: 6px; }
+.merge-members p { margin: 2px 0 0; font-size: 12px; opacity: 0.8; }
+.merge-group-actions { display: flex; gap: 8px; }
+.merge-progress { height: 6px; background: #eee; border-radius: 3px; overflow: hidden; margin: 8px 0; }
+.merge-progress span { display: block; height: 100%; background: #2f7cf6; transition: width .3s; }
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; z-index: 50; }
+.modal { background: #fff; border-radius: 10px; padding: 18px 20px; width: min(640px, 92vw); max-height: 86vh; overflow: auto; box-shadow: 0 12px 40px rgba(0,0,0,.25); }
+.merge-preview textarea { width: 100%; box-sizing: border-box; font: inherit; }
+button.link { background: none; border: none; color: #2f7cf6; cursor: pointer; padding: 0 4px; }

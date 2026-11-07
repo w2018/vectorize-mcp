@@ -8,6 +8,8 @@ import {
   type SearchData,
   type SearchInput,
   type Config,
+  type SimilarityGroup,
+  type MaintenanceJob,
 } from "../core/types.js";
 import {
   OpenAIEmbedding,
@@ -748,6 +750,297 @@ export class MemoryService implements McpService<Context> {
       truncated: candidates.truncated,
       basis: "llm",
     };
+  }
+  /** 启动时把上次残留的 queued/running 任务标记为 interrupted。 */
+  async interruptStaleJobs(): Promise<number> {
+    return this.database.write<number>("jobs", "markStaleJobsInterrupted");
+  }
+  async listSimilarityGroups(
+    subjectId: string,
+    filters: { status?: string; limit?: number; offset?: number },
+  ) {
+    return this.database.read("groups", "listSimilarityGroups", subjectId, filters);
+  }
+  async getSimilarityGroup(subjectId: string, id: string) {
+    return this.database.read("groups", "getSimilarityGroup", subjectId, id);
+  }
+  async ignoreSimilarityGroups(subjectId: string, ids: string[]) {
+    return this.database.write("groups", "ignoreSimilarityGroups", subjectId, ids);
+  }
+  async getMaintenanceJob(jobId: string) {
+    return this.database.read("jobs", "getMaintenanceJob", jobId);
+  }
+  async startRebuildGroupsJob(
+    subjectId: string,
+    options: { limit?: number; groupThreshold?: number } = {},
+  ) {
+    const job = await this.database.write<MaintenanceJob>(
+      "jobs",
+      "createMaintenanceJob",
+      subjectId,
+      "rebuild_groups",
+      options,
+    );
+    void this.runRebuildGroupsJob(job.id, subjectId, options);
+    return job;
+  }
+  private async runRebuildGroupsJob(
+    jobId: string,
+    subjectId: string,
+    options: { limit?: number; groupThreshold?: number },
+  ): Promise<void> {
+    try {
+      await this.database.write("jobs", "updateMaintenanceJob", jobId, {
+        status: "running",
+        total: 1,
+      });
+      const result = await this.database.write<{
+        memories: number;
+        candidates: number;
+        groups: number;
+        truncated: boolean;
+      }>("groups", "rebuildSimilarityGroups", subjectId, options);
+      await this.database.write("jobs", "updateMaintenanceJob", jobId, {
+        status: "done",
+        done: 1,
+        result,
+      });
+    } catch (error) {
+      await this.database
+        .write("jobs", "updateMaintenanceJob", jobId, {
+          status: "failed",
+          error: error instanceof Error ? error.message : "建组任务失败",
+        })
+        .catch(() => {});
+    }
+  }
+  /** 生成一个分组的合并稿（不写库）。 */
+  async previewMergeGroup(subjectId: string, groupId: string): Promise<{
+    group_id: string;
+    title?: string;
+    content: string;
+    type: string;
+    keywords: string[];
+    importance?: number;
+    reason: string;
+  }> {
+    const group = await this.database.read<SimilarityGroup | null>(
+      "groups",
+      "getSimilarityGroup",
+      subjectId,
+      groupId,
+    );
+    if (!group) throw new DomainError("NOT_FOUND");
+    return this.buildMergeDraft(subjectId, group);
+  }
+  private async buildMergeDraft(
+    subjectId: string,
+    group: SimilarityGroup,
+  ): Promise<{
+    group_id: string;
+    title?: string;
+    content: string;
+    type: string;
+    keywords: string[];
+    importance?: number;
+    reason: string;
+  }> {
+    const config = await this.effectiveModelConfig();
+    if (!config.enabled)
+      throw new DomainError(
+        "FEATURE_DISABLED",
+        "尚未配置通用模型；请先在「记忆整理」页填写模型服务地址与模型名。",
+      );
+    const members = group.members ?? [];
+    if (members.length < 2) throw new DomainError("GROUP_TOO_SMALL");
+    const model = this.chatModel(config.baseUrl, config.model);
+    const listing = members
+      .map(
+        (m, index) =>
+          "[" +
+          index +
+          "] id=" +
+          m.memory_id +
+          "\n    标题:" +
+          (m.title ?? "(无)") +
+          "\n    类型:" +
+          (m.type ?? "") +
+          "\n    正文:" +
+          String(m.content ?? "").slice(0, 500),
+      )
+      .join("\n");
+    const prompt =
+      "下面是同一账户下被判定为高度相似的一组记忆。请把它们压缩合并成一条更精炼、信息完整的记忆。" +
+      "只能使用给出的记忆内容，不要编造新事实；如果不同记忆之间存在矛盾（如不同数字、日期），请在 reason 中说明并保留更可信的一条。" +
+      "只输出 JSON，不要解释，格式：{\"title\":\"\",\"content\":\"\",\"type\":\"\",\"keywords\":[\"\"],\"importance\":1到99,\"reason\":\"\"}。" +
+      "type 必须与组内类型一致。\n" +
+      listing;
+    const reply = await model.chat(
+      [
+        { role: "system", content: "你是严谨的记忆库整理助手，只输出 JSON。" },
+        { role: "user", content: prompt },
+      ],
+      2048,
+    );
+    const first = reply.indexOf("{");
+    const last = reply.lastIndexOf("}");
+    if (first < 0 || last <= first) throw new DomainError("MODEL_INVALID", "模型没有返回合法 JSON。");
+    let parsed: {
+      title?: unknown;
+      content?: unknown;
+      type?: unknown;
+      keywords?: unknown;
+      importance?: unknown;
+      reason?: unknown;
+    };
+    try {
+      parsed = JSON.parse(reply.slice(first, last + 1));
+    } catch {
+      throw new DomainError("MODEL_INVALID", "模型返回的 JSON 无法解析。");
+    }
+    const content = typeof parsed.content === "string" ? parsed.content.trim() : "";
+    if (!content) throw new DomainError("MODEL_INVALID", "模型没有返回合并后的正文。");
+    const type = typeof parsed.type === "string" ? parsed.type : (members[0]?.type ?? "fact");
+    if (!["fact", "preference", "project", "lesson"].includes(type))
+      throw new DomainError("MODEL_INVALID", "模型返回的类型不在允许合并的范围内。");
+    const keywords = Array.isArray(parsed.keywords)
+      ? parsed.keywords.filter((k): k is string => typeof k === "string").slice(0, 12)
+      : [];
+    const importance = Number(parsed.importance);
+    void subjectId;
+    return {
+      group_id: group.id,
+      title: typeof parsed.title === "string" ? parsed.title.slice(0, 200) : undefined,
+      content,
+      type,
+      keywords,
+      importance: Number.isFinite(importance) ? Math.max(1, Math.min(99, importance)) : undefined,
+      reason: typeof parsed.reason === "string" ? parsed.reason.slice(0, 500) : "",
+    };
+  }
+  async startMergeGroupsJob(
+    subjectId: string,
+    groupIds: string[],
+  ): Promise<MaintenanceJob> {
+    const job = await this.database.write<MaintenanceJob>(
+      "jobs",
+      "createMaintenanceJob",
+      subjectId,
+      "merge_groups",
+      { group_ids: groupIds },
+    );
+    void this.runMergeGroupsJob(job.id, subjectId, groupIds);
+    return job;
+  }
+  private async runMergeGroupsJob(
+    jobId: string,
+    subjectId: string,
+    groupIds: string[],
+  ): Promise<void> {
+    const detail: {
+      group_id: string;
+      target_id: string;
+      new_revision: number;
+      archived: { id: string; revision: number }[];
+    }[] = [];
+    const skipped: { group_id: string; reason: string }[] = [];
+    try {
+      await this.database.write("jobs", "updateMaintenanceJob", jobId, {
+        status: "running",
+        total: groupIds.length,
+      });
+      const ctx = await this.database.read<Context>("ctx", "adminFor", subjectId);
+      for (let i = 0; i < groupIds.length; i++) {
+        const groupId = groupIds[i]!;
+        const job = await this.database.read<MaintenanceJob | null>(
+          "jobs",
+          "getMaintenanceJob",
+          jobId,
+        );
+        if (job?.status === "cancelled") break;
+        const group = await this.database.read<SimilarityGroup | null>(
+          "groups",
+          "getSimilarityGroup",
+          subjectId,
+          groupId,
+        );
+        if (!group || (group.status !== "proposed" && group.status !== "ignored")) {
+          skipped.push({ group_id: groupId, reason: "分组状态已变化" });
+        } else {
+          try {
+            const draft = await this.buildMergeDraft(subjectId, group);
+            const merged = await this.database.write<{
+              group_id: string;
+              target_id: string;
+              archived: { id: string; revision: number }[];
+              revision: number;
+            }>("groups", "mergeSimilarityGroup", ctx, groupId, draft.content);
+            detail.push({
+              group_id: merged.group_id,
+              target_id: merged.target_id,
+              new_revision: merged.revision,
+              archived: merged.archived,
+            });
+          } catch (error) {
+            skipped.push({
+              group_id: groupId,
+              reason: error instanceof Error ? error.message : "合并失败",
+            });
+          }
+        }
+        await this.database.write("jobs", "updateMaintenanceJob", jobId, {
+          done: i + 1,
+          total: groupIds.length,
+        });
+      }
+      let batchId: string | undefined;
+      if (detail.length)
+        batchId = (
+          await this.database.write<{ id: string }>(
+            "batches",
+            "createMergeBatch",
+            subjectId,
+            jobId,
+            detail,
+          )
+        ).id;
+      const finalJob = await this.database.read<MaintenanceJob | null>(
+        "jobs",
+        "getMaintenanceJob",
+        jobId,
+      );
+      if (finalJob?.status !== "cancelled")
+        await this.database.write("jobs", "updateMaintenanceJob", jobId, {
+          status: "done",
+          done: groupIds.length,
+          total: groupIds.length,
+          result: { batch_id: batchId, merged: detail.length, skipped },
+        });
+    } catch (error) {
+      await this.database
+        .write("jobs", "updateMaintenanceJob", jobId, {
+          status: "failed",
+          error: error instanceof Error ? error.message : "合并任务失败",
+          result: { batch_id: undefined, merged: detail.length, skipped },
+        })
+        .catch(() => {});
+    }
+  }
+  async cancelMaintenanceJob(jobId: string) {
+    const job = await this.database.read<MaintenanceJob | null>("jobs", "getMaintenanceJob", jobId);
+    if (!job) throw new DomainError("NOT_FOUND");
+    if (job.status !== "queued" && job.status !== "running")
+      throw new DomainError("JOB_STATUS", "该任务已结束，无法取消。");
+    return this.database.write("jobs", "updateMaintenanceJob", jobId, { status: "cancelled" });
+  }
+  async undoMergeBatch(subjectId: string, batchId: string) {
+    return this.database.write("undo", "undoMergeBatch", subjectId, batchId);
+  }
+  async compactPreview(subjectId: string) {
+    return this.database.read("compact", "compactPreview", subjectId);
+  }
+  async compactArchivedVersions(subjectId: string) {
+    return this.database.write("compact", "compactArchivedVersions", subjectId);
   }
   private readableModelError(error: unknown): string {
     const message =

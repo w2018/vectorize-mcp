@@ -192,6 +192,7 @@ export async function buildApp(options: AppOptions) {
         )
       : null;
     const service = new MemoryService(db, null, env, secret);
+  void service.interruptStaleJobs().catch(() => {});
     const mcp = createMcpHandler(service);
     app.route({
       method: ["GET", "POST", "DELETE"],
@@ -233,6 +234,19 @@ export async function buildApp(options: AppOptions) {
       saveKey: (apiKey) => service.saveKey(apiKey),
       rebuildSimilarityWithModel: (subjectId) =>
         service.rebuildSimilarityWithModel(subjectId),
+      maintenance: {
+        listGroups: (subjectId, filters) => service.listSimilarityGroups(subjectId, filters),
+        getGroup: (subjectId, id) => service.getSimilarityGroup(subjectId, id),
+        ignoreGroups: (subjectId, ids) => service.ignoreSimilarityGroups(subjectId, ids),
+        rebuildGroups: (subjectId, options) => service.startRebuildGroupsJob(subjectId, options),
+        previewMerge: (subjectId, groupId) => service.previewMergeGroup(subjectId, groupId),
+        startMerge: (subjectId, groupIds) => service.startMergeGroupsJob(subjectId, groupIds),
+        getJob: (jobId) => service.getMaintenanceJob(jobId),
+        cancelJob: (jobId) => service.cancelMaintenanceJob(jobId),
+        undoBatch: (subjectId, batchId) => service.undoMergeBatch(subjectId, batchId),
+        compactPreview: (subjectId) => service.compactPreview(subjectId),
+        compact: (subjectId) => service.compactArchivedVersions(subjectId),
+      },
     });
     app.get("/health", async () => ({ ok: true, version: APP_VERSION }));
     const webRoot = resolve(options.webRoot ?? "dist/web");

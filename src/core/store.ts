@@ -44,6 +44,9 @@ import type {
   ArchiveInput,
   RestoreInput,
   SearchInput,
+  SimilarityGroup,
+  MaintenanceJob,
+  MergeBatch,
   SearchData,
   SearchItem,
   GetInput,
@@ -2726,6 +2729,395 @@ export class Store {
       return pairs.length;
     });
     return { pairs: pairs.length };
+  }
+  /** 建组：词法召回 → 贪心聚类 → 写 similarity_groups（表 A）。 */
+  rebuildSimilarityGroups(
+    subjectId: string,
+    options: { limit?: number; groupThreshold?: number; buildThreshold?: number } = {},
+  ): { memories: number; candidates: number; groups: number; truncated: boolean } {
+    this.adminFor(subjectId);
+    const config = this.getConfig();
+    const buildThreshold = options.buildThreshold ?? Math.min(config.similarityBuildThreshold, 0.4);
+    const groupThreshold = options.groupThreshold ?? 0.85;
+    const cap = options.limit ?? 300;
+    const allowed = new Set(["fact", "preference", "project", "lesson"]);
+    const memories = this.all(subjectId).filter((m) => this.effective(m) && allowed.has(m.type));
+    const byId = new Map(memories.map((m) => [m.id, m]));
+    const features = new Map<string, Set<string>>();
+    for (const m of memories) features.set(m.id, this.featuresOf(m));
+    const df = new Map<string, number>();
+    for (const set of features.values()) for (const term of set) df.set(term, (df.get(term) ?? 0) + 1);
+    const postings = new Map<string, string[]>();
+    for (const [id, set] of features)
+      for (const term of set) {
+        const list = postings.get(term);
+        if (list) list.push(id);
+        else postings.set(term, [id]);
+      }
+    const pairCounts = new Map<string, number>();
+    for (const [id, set] of features) {
+      const terms = [...set]
+        .filter((term) => (df.get(term) ?? 0) >= 2)
+        .sort((a, b) => (df.get(a) ?? 0) - (df.get(b) ?? 0))
+        .slice(0, 12);
+      for (const term of terms)
+        for (const other of postings.get(term) ?? [])
+          if (other !== id) {
+            const key = id < other ? id + SEP + other : other + SEP + id;
+            pairCounts.set(key, (pairCounts.get(key) ?? 0) + 1);
+          }
+    }
+    const pairs: { a: string; b: string; score: number }[] = [];
+    for (const [key, count] of pairCounts) {
+      if (count < 2) continue;
+      const [a, b] = key.split(SEP);
+      const score = Store.jaccard(features.get(a)!, features.get(b)!);
+      if (score >= buildThreshold) pairs.push({ a, b, score });
+    }
+    pairs.sort((x, y) => y.score - x.score);
+    const truncated = pairs.length > cap;
+    const usable = pairs.slice(0, cap);
+    const assigned = new Set<string>();
+    const groups: { members: { id: string; score: number }[] }[] = [];
+    for (const pair of usable) {
+      if (assigned.has(pair.a) || assigned.has(pair.b)) continue;
+      if (pair.score < groupThreshold) continue;
+      const type = byId.get(pair.a)?.type;
+      if (type !== byId.get(pair.b)?.type) continue;
+      const group = { members: [{ id: pair.a, score: pair.score }, { id: pair.b, score: pair.score }] };
+      assigned.add(pair.a);
+      assigned.add(pair.b);
+      // 以组内任意成员为锚点继续吸收未占用的相似记忆（最多 5 条）。
+      let grew = true;
+      while (grew && group.members.length < 5) {
+        grew = false;
+        for (const candidate of usable) {
+          if (group.members.length >= 5) break;
+          const memberIds = new Set(group.members.map((m) => m.id));
+          const inside = memberIds.has(candidate.a) ? candidate.b : memberIds.has(candidate.b) ? candidate.a : "";
+          if (!inside || assigned.has(inside)) continue;
+          if (candidate.score < groupThreshold) continue;
+          if (byId.get(inside)?.type !== type) continue;
+          group.members.push({ id: inside, score: candidate.score });
+          assigned.add(inside);
+          grew = true;
+        }
+      }
+      groups.push(group);
+    }
+    const now = Date.now();
+    const ids = groups.map(() => randomUUID());
+    this.tx(() => {
+      const stale = this.rows(
+        "SELECT id FROM similarity_groups WHERE subject_id=? AND status IN ('proposed','stale')",
+        subjectId,
+      ) as { id: string }[];
+      for (const row of stale) {
+        this.db.prepare("DELETE FROM similarity_group_members WHERE group_id=?").run(row.id);
+        this.db.prepare("DELETE FROM similarity_groups WHERE id=?").run(row.id);
+      }
+      groups.forEach((group, index) => {
+        const gid = ids[index]!;
+        const members = group.members.map((m) => ({
+          memory_id: m.id,
+          revision: byId.get(m.id)!.revision,
+          score: m.score,
+        }));
+        const stateToken = hash(stable(members.map((m) => m.memory_id + ":" + m.revision).sort()));
+        const minScore = Math.min(...members.map((m) => m.score));
+        const risks: string[] = [];
+        if (minScore < 0.9) risks.push("LOW_SCORE");
+        const numbers = members.map((m) =>
+          Array.from(String(byId.get(m.memory_id)!.content).matchAll(/\d+/g)).map((x) => x[0]).sort().join(","),
+        );
+        if (new Set(numbers).size > 1) risks.push("NUMBER_CONFLICT");
+        this.db
+          .prepare("INSERT INTO similarity_groups VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
+          .run(
+            gid,
+            subjectId,
+            "lexical",
+            "",
+            groupThreshold,
+            minScore,
+            members.length,
+            stateToken,
+            "proposed",
+            risks.join(","),
+            now,
+            now,
+          );
+        for (const m of members)
+          this.db
+            .prepare("INSERT INTO similarity_group_members VALUES (?,?,?,?,?)")
+            .run(gid, m.memory_id, m.revision, m.score, "member");
+      });
+      return groups.length;
+    });
+    return { memories: memories.length, candidates: usable.length, groups: groups.length, truncated };
+  }
+  listSimilarityGroups(
+    subjectId: string,
+    filters: { status?: string; limit?: number; offset?: number } = {},
+  ): { items: SimilarityGroup[]; total: number } {
+    this.adminFor(subjectId);
+    const limit = Math.max(1, Math.min(200, filters.limit ?? 50));
+    const offset = Math.max(0, filters.offset ?? 0);
+    const where = "subject_id=?" + (filters.status ? " AND status=?" : "");
+    const args: unknown[] = filters.status ? [subjectId, filters.status] : [subjectId];
+    const total = Number((this.row("SELECT count(*) AS c FROM similarity_groups WHERE " + where, ...args) as { c: number }).c);
+    const rows = this.rows(
+      "SELECT * FROM similarity_groups WHERE " + where + " ORDER BY min_score DESC, created_at DESC LIMIT ? OFFSET ?",
+      ...args,
+      limit,
+      offset,
+    ) as unknown as SimilarityGroup[];
+    return { items: rows.map((g) => this.getSimilarityGroup(subjectId, g.id)!), total };
+  }
+  getSimilarityGroup(subjectId: string, id: string): SimilarityGroup | null {
+    this.adminFor(subjectId);
+    const group = this.row("SELECT * FROM similarity_groups WHERE id=? AND subject_id=?", id, subjectId) as
+      | SimilarityGroup
+      | undefined;
+    if (!group) return null;
+    const members = this.rows(
+      "SELECT m.memory_id AS memory_id, r.revision AS revision, m.score AS score, m.role AS role, r.data AS data, r.status AS status FROM similarity_group_members m JOIN memories r ON r.id=m.memory_id WHERE m.group_id=?",
+      id,
+    ) as { memory_id: string; revision: number; score: number; role: string; data: string; status: string }[];
+    group.members = members.map((m) => {
+      const memory = JSON.parse(m.data) as Memory;
+      return {
+        memory_id: m.memory_id,
+        revision: m.revision,
+        score: m.score,
+        role: m.role,
+        title: memory.title,
+        content: memory.content,
+        type: memory.type,
+        importance: memory.importance,
+        status: m.status,
+      };
+    });
+    return group;
+  }
+  ignoreSimilarityGroups(subjectId: string, ids: string[]): { ignored: number } {
+    this.adminFor(subjectId);
+    let ignored = 0;
+    this.tx(() => {
+      for (const id of ids) {
+        const result = this.db
+          .prepare("UPDATE similarity_groups SET status='ignored', updated_at=? WHERE id=? AND subject_id=? AND status='proposed'")
+          .run(Date.now(), id, subjectId);
+        ignored += result.changes;
+      }
+      return ignored;
+    });
+    return { ignored };
+  }
+  /** 合并一个已选分组：校验 state_token/revision，选最高分作为 target，其余归档。 */
+  mergeSimilarityGroup(
+    ctx: Context,
+    groupId: string,
+    finalContent: string,
+  ): { group_id: string; target_id: string; archived: { id: string; revision: number }[]; revision: number } {
+    const group = this.getSimilarityGroup(ctx.subjectId, groupId);
+    check(group, "NOT_FOUND");
+    check(group.status === "proposed" || group.status === "ignored", "GROUP_STATUS");
+    const token = hash(
+      stable(
+        (group.members ?? [])
+          .map((m) => m.memory_id + ":" + m.revision)
+          .sort(),
+      ),
+    );
+    check(token === group.state_token, "STALE_GROUP");
+    const ordered = [...(group.members ?? [])].sort((a, b) => b.score - a.score);
+    const target = ordered[0]!;
+    const sources = ordered.slice(1);
+    check(sources.length >= 1, "GROUP_TOO_SMALL");
+    const result = this.merge(ctx, {
+      request_id: randomUUID(),
+      target: { id: target.memory_id, revision: target.revision },
+      sources: sources.map((m) => ({ id: m.memory_id, revision: m.revision })),
+      final_content: finalContent,
+      reason: "模型压缩去重合并",
+      source: { platform: "memory-consolidation" },
+    } as MergeInput);
+    const data = result.data as { target_id: string; revision: number; archived_ids: string[] };
+    this.db
+      .prepare("UPDATE similarity_groups SET status='merged', updated_at=? WHERE id=?")
+      .run(Date.now(), groupId);
+    return {
+      group_id: groupId,
+      target_id: data.target_id,
+      archived: sources.map((m) => ({ id: m.memory_id, revision: m.revision })),
+      revision: data.revision,
+    };
+  }
+  /** 撤销一批合并：来源恢复 active，target 归档（不物理删除）。 */
+  undoMergeBatch(subjectId: string, batchId: string): { restored: number; skipped: string[] } {
+    this.adminFor(subjectId);
+    const batch = this.row(
+      "SELECT * FROM merge_batches WHERE id=? AND subject_id=?",
+      batchId,
+      subjectId,
+    ) as (MergeBatch & { detail: unknown }) | undefined;
+    check(batch, "NOT_FOUND");
+    const batchDetail = (typeof batch.detail === "string"
+      ? JSON.parse(batch.detail)
+      : batch.detail) as {
+      group_id: string;
+      target_id: string;
+      new_revision: number;
+      archived: { id: string; revision: number }[];
+    }[];
+    check(batch.status === "done", "BATCH_STATUS");
+    check(Date.now() - Number(batch.created_at) <= 7 * 24 * 60 * 60 * 1000, "UNDO_EXPIRED");
+    let restored = 0;
+    const skipped: string[] = [];
+    this.tx(() => {
+      for (const raw of batchDetail) {
+        const target = this.row("SELECT data FROM memories WHERE id=?", raw.target_id) as { data: string } | undefined;
+        if (target) {
+          const memory = JSON.parse(target.data) as Memory;
+          if (Number(memory.revision) !== Number(raw.new_revision)) {
+            skipped.push(raw.group_id);
+            continue;
+          }
+          memory.status = "archived";
+          memory.archived_at = Date.now();
+          memory.archive_reason = "merge undone";
+          memory.revision++;
+          memory.updated_at = Date.now();
+          this.save(memory);
+        }
+        for (const item of raw.archived) {
+          const row = this.row("SELECT data FROM memories WHERE id=?", item.id) as { data: string } | undefined;
+          if (!row) continue;
+          const memory = JSON.parse(row.data) as Memory;
+          memory.status = "active";
+          memory.merged_into = null;
+          memory.archived_at = null;
+          memory.archive_reason = null;
+          memory.revision++;
+          memory.updated_at = Date.now();
+          this.save(memory);
+          restored++;
+        }
+        this.db.prepare("UPDATE similarity_groups SET status='stale', updated_at=? WHERE id=?").run(Date.now(), raw.group_id);
+      }
+      this.db.prepare("UPDATE merge_batches SET status='undone', undone_at=? WHERE id=?").run(Date.now(), batchId);
+      return restored;
+    });
+    return { restored, skipped };
+  }
+  /** 已归档记忆的历史版本占用量（空间回收预览）。 */
+  compactPreview(subjectId: string): { rows: number; bytes: number } {
+    this.adminFor(subjectId);
+    const row = this.row(
+      "SELECT count(*) AS c, coalesce(sum(length(v.data)),0) AS b FROM versions v JOIN memories m ON m.id=v.memory_id WHERE m.subject_id=? AND m.status<>'active'",
+      subjectId,
+    ) as { c: number; b: number };
+    return { rows: Number(row.c), bytes: Number(row.b) };
+  }
+  compactArchivedVersions(subjectId: string): { deleted: number; bytes: number } {
+    this.adminFor(subjectId);
+    const preview = this.compactPreview(subjectId);
+    this.db
+      .prepare(
+        "DELETE FROM versions WHERE memory_id IN (SELECT id FROM memories WHERE subject_id=? AND status<>'active')",
+      )
+      .run(subjectId);
+    this.db.exec("PRAGMA optimize");
+    return { deleted: preview.rows, bytes: preview.bytes };
+  }
+  createMaintenanceJob(
+    subjectId: string,
+    kind: "rebuild_groups" | "merge_groups",
+    options: Record<string, unknown> = {},
+  ): MaintenanceJob {
+    this.adminFor(subjectId);
+    const active = this.row(
+      "SELECT id FROM maintenance_jobs WHERE subject_id=? AND status IN ('queued','running')",
+      subjectId,
+    );
+    check(!active, "JOB_BUSY");
+    const job: MaintenanceJob = {
+      id: randomUUID(),
+      subject_id: subjectId,
+      kind,
+      status: "queued",
+      total: 0,
+      done: 0,
+      options,
+      result: {},
+      error: "",
+      created_at: Date.now(),
+      updated_at: Date.now(),
+    };
+    this.db
+      .prepare("INSERT INTO maintenance_jobs VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+      .run(job.id, subjectId, kind, job.status, 0, 0, JSON.stringify(options), "{}", "", job.created_at, job.updated_at);
+    return job;
+  }
+  updateMaintenanceJob(
+    jobId: string,
+    patch: { status?: string; total?: number; done?: number; result?: unknown; error?: string },
+  ): MaintenanceJob | null {
+    const current = this.getMaintenanceJob(jobId);
+    if (!current) return null;
+    const next = { ...current, ...patch, updated_at: Date.now() } as MaintenanceJob;
+    this.db
+      .prepare("UPDATE maintenance_jobs SET status=?,total=?,done=?,result=?,error=?,updated_at=? WHERE id=?")
+      .run(
+        next.status,
+        Number(next.total),
+        Number(next.done),
+        JSON.stringify(next.result ?? {}),
+        String(next.error ?? ""),
+        next.updated_at,
+        jobId,
+      );
+    return next;
+  }
+  getMaintenanceJob(jobId: string): MaintenanceJob | null {
+    const row = this.row("SELECT * FROM maintenance_jobs WHERE id=?", jobId) as
+      | (Omit<MaintenanceJob, "options" | "result"> & { options: string; result: string })
+      | undefined;
+    if (!row) return null;
+    return {
+      ...row,
+      total: Number(row.total),
+      done: Number(row.done),
+      options: JSON.parse(row.options || "{}") as Record<string, unknown>,
+      result: JSON.parse(row.result || "{}") as Record<string, unknown>,
+    };
+  }
+  markStaleJobsInterrupted(): number {
+    const result = this.db
+      .prepare("UPDATE maintenance_jobs SET status='interrupted', updated_at=? WHERE status IN ('queued','running')")
+      .run(Date.now());
+    return result.changes;
+  }
+  createMergeBatch(
+    subjectId: string,
+    jobId: string,
+    detail: { group_id: string; target_id: string; new_revision: number; archived: { id: string; revision: number }[] }[],
+  ): MergeBatch {
+    const batch: MergeBatch = {
+      id: randomUUID(),
+      subject_id: subjectId,
+      job_id: jobId,
+      status: "done",
+      groups: detail.length,
+      detail,
+      created_at: Date.now(),
+      undone_at: null,
+    };
+    this.db
+      .prepare("INSERT INTO merge_batches VALUES (?,?,?,?,?,?,?,?)")
+      .run(batch.id, subjectId, jobId, batch.status, batch.groups, JSON.stringify(detail), batch.created_at, null);
+    return batch;
   }
   /** 读取某条记忆的相似关系（供 Web 详情展示），按相似度降序，最多 20 条。 */
   relatedSimilarity(subjectId: string, id: string) {
