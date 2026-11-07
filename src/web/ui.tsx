@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api, errorText, type Preview } from "./api";
-export function useResource<T>(path: string | null, refresh = 0) {
+export function useResource<T>(path: string | null, refresh: string | number = 0) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -172,6 +172,7 @@ export function ConfirmDialog({
   disabled = false,
   confirmLabel = "确认执行",
   verificationCode,
+  onRetry,
 }: {
   title: string;
   children?: ReactNode;
@@ -180,6 +181,8 @@ export function ConfirmDialog({
   disabled?: boolean;
   confirmLabel?: string;
   verificationCode?: string;
+  /** Regenerate a consumed preview_token instead of replaying an expired one. */
+  onRetry?: () => void;
 }) {
   const [state, setState] = useState<
     "confirm" | "busy" | "success" | "error" | "cancelled"
@@ -189,6 +192,16 @@ export function ConfirmDialog({
   const lock = useRef(false);
   function cancel() {
     if (!lock.current) setState("cancelled");
+  }
+  async function retry() {
+    if (onRetry) {
+      setError("");
+      setVerificationInput("");
+      setState("confirm");
+      onRetry();
+      return;
+    }
+    await execute();
   }
   async function execute() {
     if (lock.current) return;
@@ -290,12 +303,14 @@ export function ConfirmDialog({
                   state === "busy" ||
                   (!!verificationCode && verificationInput.length !== 6)
                 }
-                onClick={() => void execute()}
+                onClick={() => void (state === "error" ? retry() : execute())}
               >
                 {state === "busy"
                   ? "确认中…"
                   : state === "error"
-                    ? "重试"
+                    ? onRetry
+                      ? "重新预览"
+                      : "重试"
                     : confirmLabel}
               </button>
             </>

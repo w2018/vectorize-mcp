@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Graph3D } from "./graph3d";
 import {
   api,
+  dataChanged,
   query,
   writeBody,
   type AccountKind,
@@ -47,6 +48,7 @@ export function GraphView({
   const [version, setVersion] = useState(0);
   const [type, setType] = useState("");
   const [search, setSearch] = useState("");
+  const [serverQuery, setServerQuery] = useState("");
   const [timePoint, setTimePoint] = useState<number | null>(null);
   const [selected, setSelected] = useState<Memory | null>(null);
   const [list, setList] = useState(false);
@@ -59,6 +61,7 @@ export function GraphView({
     setVersion(0);
     setType("");
     setSearch("");
+    setServerQuery("");
     setTimePoint(null);
     setSelected(null);
     setRelation(false);
@@ -66,15 +69,23 @@ export function GraphView({
     setRemovingLink(null);
     setFallbackReason("");
   }, [subject, kind]);
+  // D-16: search is issued server-side so it covers the whole account, not just
+  // the 500 nodes already loaded; local filtering only gives instant feedback
+  // while the debounce is still pending.
+  useEffect(() => {
+    const timer = setTimeout(() => setServerQuery(search.trim()), 250);
+    return () => clearTimeout(timer);
+  }, [search]);
   const graph = useResource<Graph>(
     "/graph" +
       query({
         subject_id: subject,
         type,
-        node_limit: 500,
+        q: serverQuery || undefined,
+        node_limit: 5000,
         edge_limit: 500,
       }),
-    refresh + version,
+    `${refresh}:${version}`,
   );
   const allNodes = useMemo(() => graph.data?.nodes || [], [graph.data]);
   const allEdges = useMemo(() => graph.data?.edges || [], [graph.data]);
@@ -160,8 +171,7 @@ export function GraphView({
       )}
       {graph.data?.truncated && (
         <div className="notice warning">
-          只显示部分关系（最多 500 个点、500
-          条边）。缩小空间或类型范围可看得更清楚。
+          当前账户记忆较多，星图最多显示 5000 个点、500 条边。搜索框的关键词由服务端在全库范围内筛选，不受已加载节点数量限制；缩小类型范围或指定关键词可看得更清楚。
         </div>
       )}
       <State
@@ -425,6 +435,7 @@ export function GraphView({
                 expected_revision: removingLink.revision,
               }),
             );
+            dataChanged();
             setVersion((v) => v + 1);
             setRemovingLink(null);
           }}
@@ -457,6 +468,7 @@ export function GraphView({
                     expected_revision: editingLink.revision,
                   }),
                 );
+                dataChanged();
                 setEditingLink(null);
                 setVersion((v) => v + 1);
               }, "关系强度已更新");
@@ -516,6 +528,7 @@ export function GraphView({
                     strength: Number(f.get("strength")),
                   }),
                 );
+                dataChanged();
                 setRelation(false);
                 setVersion((v) => v + 1);
               }, "关系已保存");
@@ -633,43 +646,27 @@ export function Stats({
   const [rebuildResult, setRebuildResult] = useState<string>("");
   const d = data.data;
   const embeddingMissing = config.data && !config.data.embeddingModel;
+  const pct = (value: number | null | undefined) =>
+    value == null ? "—" : (value * 100).toFixed(1) + "%";
   const metricGroups = [
     {
       title: "记忆规模",
       items: [
+        ["记忆总条数", d?.memory_total],
         ["已激活记忆", d?.active],
         ["已归档", d?.archived],
+        ["已合并", d?.merged],
         ["记忆内容 token", d?.memory_total_tokens],
       ],
     },
     {
       title: "检索质量",
       items: [
-        [
-          "有结果率",
-          (d?.result_rate ?? d?.hit_effective_rate) == null
-            ? "—"
-            : ((d?.result_rate ?? d?.hit_effective_rate)! * 100).toFixed(1) +
-              "%",
-        ],
-        [
-          "标注 Hit@1（答案第 1 位）",
-          d?.labeled_hit_at_1 == null
-            ? "—"
-            : (d.labeled_hit_at_1 * 100).toFixed(1) + "%",
-        ],
-        [
-          "标注 Hit@3（答案前 3 位）",
-          d?.labeled_hit_at_3 == null
-            ? "—"
-            : (d.labeled_hit_at_3 * 100).toFixed(1) + "%",
-        ],
-        [
-          "空结果率",
-          d?.empty_result_rate == null
-            ? "—"
-            : (d.empty_result_rate * 100).toFixed(1) + "%",
-        ],
+        ["有结果率", pct(d?.result_rate ?? d?.hit_effective_rate)],
+        ["标注检索请求", d?.labeled_search_requests ?? "—"],
+        ["标注 Hit@1（答案第 1 位）", pct(d?.labeled_hit_at_1)],
+        ["标注 Hit@3（答案前 3 位）", pct(d?.labeled_hit_at_3)],
+        ["空结果率", pct(d?.empty_result_rate)],
       ],
     },
     {
@@ -683,6 +680,7 @@ export function Stats({
             : "—",
         ],
         ["被找到次数", d?.retrieval_count],
+        ["词法降级率", pct(d?.degraded_rate)],
         ["索引失败", d?.index_failed],
       ],
     },
@@ -715,11 +713,12 @@ export function Stats({
               const stats = await api<{ memories: number; pairs: number }>(
                 "/maintenance/similarity",
                 "POST",
-                writeBody({ subject_id: subject, threshold: 0.55, neighbors: 5 }),
+                writeBody({ subject_id: subject, neighbors: 5 }),
               );
               setRebuildResult(
                 "已扫描 " + stats.memories + " 条记忆，关联 " + stats.pairs + " 对相似记忆。",
               );
+              dataChanged();
             } catch (error) {
               setRebuildResult(error instanceof Error ? error.message : "重建失败");
             } finally {
@@ -751,9 +750,8 @@ export function Stats({
           <h2>如何理解这些数字</h2>
           {embeddingMissing && (
             <div className="notice warning">
-              当前未配置向量编码器，检索只能走词法匹配（词法降级率会接近
-              100%）。到「设置 → 检索配置」填写 embeddingModel /
-              embeddingBaseUrl / embeddingDimension
+              当前未配置向量编码器，检索只能走词法匹配；上方「词法降级率」会显示所选时间范围内的实际降级比例。到「设置 → 检索配置」填写
+              embeddingModel / embeddingBaseUrl / embeddingDimension
               后保存，可启用语义检索、明显提升召回率与有结果率。
             </div>
           )}
@@ -764,17 +762,17 @@ export function Stats({
           <p>
             <strong>标注 Hit@1 / Hit@3 是什么？</strong>{" "}
             假设一条测试查询的标准答案是记忆 A：A 排在返回结果第 1 位 → Hit@1
-            命中；A 排在第 2 或第 3 位 → Hit@3 命中；A 不在前 3 → 未命中。标注
-            Hit@1 74.5% 表示 200 条有标准答案的测试中约 149
-            条把答案排在第 1 位。普通搜索没有标准答案，因此显示为“—”。
+            命中；A 排在第 2 或第 3 位 → Hit@3 命中；A 不在前 3 → 未命中。当前账户共{" "}
+            {d?.labeled_search_requests ?? 0} 条带标准答案的检索，其中标注 Hit@1 为{" "}
+            {pct(d?.labeled_hit_at_1)}、标注 Hit@3 为 {pct(d?.labeled_hit_at_3)}
+            。普通搜索没有标准答案，因此显示为“—”。
           </p>
           <p>
-            <strong>重建相似关系</strong> 会扫描当前账户全部记忆，按内容相似度（默认
-            0.55）重新生成 memory_similarity
+            <strong>重建相似关系</strong> 会扫描当前账户全部记忆，按「设置 → 检索配置」中的相似度构建阈值重新生成 memory_similarity
             自动关系，用于检索时折叠高度相似记忆、减少重复内容；它不会修改或删除手动关系链（links）。
           </p>
           <p>
-            <strong>提取内容 token</strong> 为所选时间范围内实际返回内容的累计估算，用于衡量检索带来的上下文成本，不代表计费
+            <strong>提取内容 token</strong> 为所选时间范围内实际返回内容的累计估算，用于衡量检索带来的上下文成本；v0.5.0 起所有「token」口径统一为响应 data 的 UTF-8 字节数（与 token_budget 同单位），不是模型精确分词，也不代表计费
             token；<strong>记忆内容 token</strong>
             是当前所有记忆正文的估算总量。没有检索请求时命中率、空结果率等显示为“—”。
           </p>
@@ -881,7 +879,7 @@ export function Suggestions({
   const [version, setVersion] = useState(0);
   const data = useResource<Page<Suggestion>>(
     "/suggestions" + query({ subject_id: subject }),
-    refresh + version,
+    `${refresh}:${version}`,
   );
   const action = useAction();
   const [preview, setPreview] = useState<{
@@ -965,6 +963,7 @@ export function Suggestions({
                   preview_token: preview.value.preview_token,
                 }),
               );
+              dataChanged();
               setPreview(null);
               setVersion((v) => v + 1);
             }, "已归档，可在记忆页面恢复")
@@ -998,6 +997,7 @@ export function Suggestions({
                     reason: f.get("reason"),
                   }),
                 );
+                dataChanged();
                 setMerge(null);
                 setVersion((v) => v + 1);
               }, "合并已完成");

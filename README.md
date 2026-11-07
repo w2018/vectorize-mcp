@@ -101,6 +101,12 @@ HTTP 客户端填写 `http://127.0.0.1:3100/mcp`，并发送请求头 `Authoriza
 
 可先不配置编码器运行，此时明确使用词法检索，不生成伪向量。配置后由后台“设置”预览并发布地址、模型与维度；更换模型会分批重建索引，未就绪期间可能退回词法结果。远程编码器会接收需要编码的内容，请自行评估数据隐私。
 
+## 返回体积与写入结果约定
+
+`estimated_tokens` 是**响应 `data` 对象的 UTF-8 字节数**（`Buffer.byteLength(JSON.stringify(data), "utf8")`），不是模型分词器算出的 token 数；它与 `token_budget` 使用同一单位，因此可以直接比较。`memory_get`、`memory_search`、`memory_bootstrap` 三处口径一致，统计页的 `average_returned_tokens` 也沿用此单位。预算用尽时 `budget_exhausted: true`，可通过提高 `token_budget`（128–1200）取回更多条。
+
+`w_memory_add` 命中相似记忆且未给 `distinct_reason` 时返回 `ok: false` / `error.code: "NEEDS_REVIEW"`，**事实并未落库**，且该结果不会进入 `request_id` 幂等缓存。调用方必须把非成功结果告知用户，检查 `data.similar_candidates`：若确实是新事实，补上 `distinct_reason` 说明差异后重新提交；若已被代表则不要再写。只有成功写入才保持静默、不向用户汇报。
+
 ## 数据与备份
 
 只支持**单个服务实例**使用同一数据目录，勿多实例共享。默认布局：
@@ -137,7 +143,7 @@ npm run dev
 
 ## 建议给 Agent 的使用约定
 
-在客户端系统提示词或项目 `AGENTS.md` 中加入（凭据页「接入方式」→「复制 AGENTS.md 文案」可一键复制完整文案）。这是**强制性**约定：**会话第一条消息必须先 `w_memory_search` 再回答**（QQBOT 账户先 `w_memory_bootstrap`），之后涉及用户偏好/画像/项目/既往决定时都要先检索；用户表达稳定偏好、画像、决定或经验时**立即静默 `w_memory_add`，不询问、不汇报**，多条事实拆开写；写入前去重，更新携带当前 `revision`；所有工具都可省略 `request_id`（服务端自动生成），只有重试同一笔写入才沿用原值；`source` 一般省略，确需来源时只传平台字符串（如 `{"platform":"desktop"}`），不要传 kind/detail；`w_memory_add` 只强依赖 `type` 与 `content`；`importance`（1–99）真实影响检索排序，长期事实给高分、临时琐事给低分；相似记忆由服务自动关联，检索时合并为代表，不必重复记录；优先更新或归档，不轻易永久删除；禁止保存密码、令牌、私钥，不把猜测当用户确认的事实。
+在客户端系统提示词或项目 `AGENTS.md` 中加入（凭据页「接入方式」→「复制 AGENTS.md 文案」可一键复制完整文案）。`estimated_tokens` 的单位是 data 的 UTF-8 字节数（与 `token_budget` 同单位）；`NEEDS_REVIEW` 不是成功，事实未保存，必须告知用户并视情况补 `distinct_reason` 重提。这是**强制性**约定：**会话第一条消息必须先 `w_memory_search` 再回答**（QQBOT 账户先 `w_memory_bootstrap`），之后涉及用户偏好/画像/项目/既往决定时都要先检索；用户表达稳定偏好、画像、决定或经验时**立即静默 `w_memory_add`，不询问、不汇报**，多条事实拆开写；写入前去重，更新携带当前 `revision`；所有工具都可省略 `request_id`（服务端自动生成），只有重试同一笔写入才沿用原值；`source` 一般省略，确需来源时只传平台字符串（如 `{"platform":"desktop"}`），不要传 kind/detail；`w_memory_add` 只强依赖 `type` 与 `content`；`importance`（1–99）真实影响检索排序，长期事实给高分、临时琐事给低分；相似记忆由服务自动关联，检索时合并为代表，不必重复记录；优先更新或归档，不轻易永久删除；禁止保存密码、令牌、私钥，不把猜测当用户确认的事实。
 
 ## 当前限制
 

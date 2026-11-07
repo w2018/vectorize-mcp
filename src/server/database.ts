@@ -72,8 +72,11 @@ export class DatabasePool {
   private writer: Connection;
   private readers: Connection[] = [];
   private cursor = 0;
-  private reads = new FairScheduler(2, 128, 8, 200);
-  private writes = new FairScheduler(1, 128, 8, 200);
+  // perKey must stay below concurrency: with (2, 128, 8, 200) the guard
+  // (byKey < perKey) can never fail, so "per-account fairness" was inert.
+  // Reader connections below are kept in sync with read concurrency.
+  private reads = new FairScheduler(4, 256, 2, 200);
+  private writes = new FairScheduler(1, 128, 1, 200);
   private maintenance = false;
   private closing = false;
   private lifecycle: Promise<unknown> | undefined;
@@ -94,10 +97,10 @@ export class DatabasePool {
     }
   }
   private async openReaders() {
-    const readers = [
-      new Connection(this.path, true),
-      new Connection(this.path, true),
-    ];
+    const readers = Array.from(
+      { length: 4 },
+      () => new Connection(this.path, true),
+    );
     try {
       await Promise.all(readers.map((r) => r.ready));
       this.readers = readers;

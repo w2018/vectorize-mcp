@@ -10,6 +10,7 @@ import { MemoryService } from "./service.js";
 import { registerAdmin } from "./admin.js";
 import { createMcpHandler } from "../mcp/http.js";
 import { createEmbeddingFromEnv } from "../embedding/openai.js";
+import { APP_VERSION } from "./version.js";
 export interface AppOptions {
   databasePath: string;
   passwordHash: string;
@@ -63,12 +64,17 @@ export async function buildApp(options: AppOptions) {
         retryable?: boolean;
         statusCode?: number;
       };
-      const code =
-        e.code && /^[A-Z][A-Z_]{2,63}$/.test(e.code)
+      // @fastify/rate-limit throws a plain Error carrying only statusCode=429,
+      // so it must be identified before the generic code derivation (D-09).
+      const rateLimited = e.statusCode === 429;
+      const code = rateLimited
+        ? "RATE_LIMITED"
+        : e.code && /^[A-Z][A-Z_]{2,63}$/.test(e.code)
           ? e.code
           : "INTERNAL_ERROR";
-      const status =
-        code === "UNAUTHENTICATED"
+      const status = rateLimited
+        ? 429
+        : code === "UNAUTHENTICATED"
           ? 401
           : code === "FORBIDDEN"
             ? 403
@@ -86,17 +92,50 @@ export async function buildApp(options: AppOptions) {
                       ? 500
                       : 400;
       if (status === 503) reply.header("Retry-After", "1");
-      reply
-        .code(status)
-        .send({
-          ok: false,
+      if (rateLimited && !reply.hasHeader("Retry-After"))
+        reply.header("Retry-After", "1");
+      // db-worker preserves human-readable messages so clients can self-correct;
+      // the HTTP layer must not replace them with a bare code (D-06).
+      const raw = e.message || code;
+      const message =
+        status === 500
+          ? "服务暂时无法完成操作"
+          : rateLimited
+            ? "请求过于频繁，请稍后重试"
+            : raw.replace(/[\r\n]+/g, " ").slice(0, 300);
+      const retryable = rateLimited ? true : (e.retryable ?? false);
+      // /mcp is a JSON-RPC endpoint: pre-handler errors (limit, oversized body)
+      // must also return a JSON-RPC envelope, not a REST error body (R-03).
+      if (request.url.startsWith("/mcp")) {
+        reply.code(status).send({
+          jsonrpc: "2.0",
+          id: null,
           error: {
-            code,
-            message: status === 500 ? "服务暂时无法完成操作" : code,
-            retryable: e.retryable ?? false,
+            code:
+              status === 401
+                ? -32001
+                : status === 403
+                  ? -32003
+                  : status === 404
+                    ? -32601
+                    : status === 413
+                      ? -32600
+                      : status === 429
+                        ? -32029
+                        : status === 503
+                          ? -32000
+                          : -32603,
+            message,
+            data: { code, retryable },
           },
-          request_id: request.id,
         });
+        return;
+      }
+      reply.code(status).send({
+        ok: false,
+        error: { code, message, retryable },
+        request_id: request.id,
+      });
     });
     const env = options.embeddingEnv ?? process.env;
     const encoder = createEmbeddingFromEnv(env);
@@ -104,34 +143,43 @@ export async function buildApp(options: AppOptions) {
       "startup",
       "getConfig",
     );
-    if (
-      encoder &&
-      config.revision === 1 &&
-      !config.embeddingModel &&
-      !config.embeddingBaseUrl
-    ) {
-      const patch = {
-        embeddingModel: encoder.descriptor.model,
-        embeddingBaseUrl: env.EMBEDDING_BASE_URL!,
-        embeddingDimension: encoder.descriptor.dimension,
-      };
-      const preview = await db.write<{ preview_token: string }>(
-        "startup",
-        "previewConfig",
-        patch,
-      );
-      await db.write("startup", "updateConfig", {
-        expected_revision: config.revision,
-        preview_token: preview.preview_token,
-        patch,
-      });
+    // v0.5.0 one-shot migration (report D-02): the legacy default
+    // tokenBudget=600 is exhausted by a single memory, so limit=3 was
+    // unreachable and hit@3 collapsed onto hit@1. Both migrations are keyed on
+    // the CURRENT value (not on config.revision), so they are idempotent and do
+    // not shadow each other; they share one updateConfig call.
+    const patch: Record<string, string | number> = {};
+    if (config.tokenBudget === 600) patch.tokenBudget = 1200;
+    // Encoder settings from the environment are filled in at any revision;
+    // gating on revision===1 used to silently defeat this after any config edit.
+    if (encoder && !config.embeddingModel && !config.embeddingBaseUrl) {
+      patch.embeddingModel = encoder.descriptor.model;
+      patch.embeddingBaseUrl = env.EMBEDDING_BASE_URL!;
+      patch.embeddingDimension = encoder.descriptor.dimension;
+    }
+    if (Object.keys(patch).length) {
+      try {
+        const preview = await db.write<{ preview_token: string }>(
+          "startup",
+          "previewConfig",
+          patch,
+        );
+        await db.write("startup", "updateConfig", {
+          expected_revision: config.revision,
+          preview_token: preview.preview_token,
+          patch,
+        });
+      } catch (error) {
+        // A failed migration must not prevent startup; it retries on next boot.
+        console.warn("[startup] config migration skipped:", error);
+      }
     }
     const service = new MemoryService(db, null, env);
     const mcp = createMcpHandler(service);
     app.route({
       method: ["GET", "POST", "DELETE"],
       url: "/mcp",
-      bodyLimit: 65536,
+      bodyLimit: 1024 * 1024,
       handler: async (request, reply) => {
         const origin = request.headers.origin;
         if (origin && origin !== options.origin) {
@@ -163,7 +211,7 @@ export async function buildApp(options: AppOptions) {
       passwordFile: options.passwordFile,
       updateRoot: options.updateRoot,
     });
-    app.get("/health", async () => ({ ok: true }));
+    app.get("/health", async () => ({ ok: true, version: APP_VERSION }));
     const webRoot = resolve(options.webRoot ?? "dist/web");
     if (existsSync(webRoot)) {
       await app.register(staticFiles, { root: webRoot });

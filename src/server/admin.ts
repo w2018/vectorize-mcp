@@ -8,6 +8,7 @@ import {
   randomBytes,
   randomInt,
   randomUUID,
+  createHash,
   scrypt,
   timingSafeEqual,
 } from "node:crypto";
@@ -17,6 +18,7 @@ import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { WebdavCloud } from "./webdav.js";
+import { APP_VERSION } from "./version.js";
 import { hashPassword } from "./password.js";
 import type { DatabasePool } from "./database.js";
 import { BOT_PRESETS } from "../core/catalog.js";
@@ -66,6 +68,37 @@ function integer(value: unknown, fallback: number, max: number): number {
   if (!Number.isSafeInteger(n) || n < 1 || n > max)
     throw new DomainError("VALIDATION_ERROR");
   return n;
+}
+/** MCP 路径把任意文本 request_id 确定性映射为合法 UUID；管理端保持一致，避免
+ * 客户端传词而非 UUID 时被 store.ts:699 / :1835 的 uuid() 拒绝。 */
+const REQUEST_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+function requestId(value: unknown): string {
+  const raw = text(value).trim();
+  if (REQUEST_ID_PATTERN.test(raw)) return raw.toLowerCase();
+  const bytes = [...createHash("sha256").update(raw).digest().subarray(0, 16)];
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Buffer.from(bytes).toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+function revision(value: unknown): number {
+  const n = Number(value);
+  if (!Number.isSafeInteger(n) || n < 1) throw new DomainError("VALIDATION_ERROR");
+  return n;
+}
+function tokenBudget(value: unknown): number | undefined {
+  if (value === undefined || value === "") return undefined;
+  const n = Number(value);
+  if (!Number.isSafeInteger(n) || n < 128 || n > 1200)
+    throw new DomainError("VALIDATION_ERROR");
+  return n;
+}
+function withinAllowed(target: string, backupDir: string): boolean {
+  const path = resolve(target);
+  return [resolve(backupDir), resolve(tmpdir())].some(
+    (dir) => path === dir || path.startsWith(dir + sep),
+  );
 }
 function offset(value: unknown): number {
   if (value === undefined || value === "") return 0;
@@ -169,15 +202,11 @@ export async function registerAdmin(
     const s = id ? sessions.get(id) : undefined;
     return s && s.expires > Date.now() ? s : undefined;
   };
-  // 只有请求本身经 HTTPS（含反代 x-forwarded-proto）时才给 cookie 加 Secure；
-  // 否则设置成 https 对外地址后，用 127.0.0.1 明文访问会因 Secure 丢失会话而“无法保存/无效”。
-  const secureCookieFor = (req: FastifyRequest) => {
-    const forwarded = req.headers["x-forwarded-proto"];
-    const proto = (
-      Array.isArray(forwarded) ? forwarded[0] : forwarded
-    )?.split(",")[0].trim() || req.protocol;
-    return proto === "https";
-  };
+  // R-02: app.ts 设 trustProxy:false，x-forwarded-proto 是客户端可伪造的裸头；
+  // 用它决定 Secure 会让明文请求被浏览器丢弃会话 cookie（self-DoS）。
+  // 只信服务端启动配置 options.origin 与实际 socket 协议。
+  const secureCookieFor = (req: FastifyRequest) =>
+    options.secureCookie || req.protocol === "https";
   const issue = (reply: FastifyReply, authenticated: boolean, req: FastifyRequest) => {
     cleanup();
     if (sessions.size >= 10000) throw new DomainError("SERVER_BUSY");
@@ -457,7 +486,7 @@ export async function registerAdmin(
       text(b.label),
       b.subject_id === undefined ? undefined : subject(b),
       {
-        request_id: text(b.request_id),
+        request_id: requestId(b.request_id),
         preview_token: b.preview_token,
         kind:
           b.kind === undefined
@@ -560,9 +589,7 @@ export async function registerAdmin(
     return read(
       "bootstrap",
       subject(q),
-      q.token_budget === undefined
-        ? undefined
-        : integer(q.token_budget, 600, 1200),
+      tokenBudget(q.token_budget),
     );
   });
   route("GET", "/memories/:id/similar", async (req) =>
@@ -617,7 +644,7 @@ export async function registerAdmin(
       id = subject(b),
       ctx = await read<Context>("adminFor", id);
     const { subject_id, ...input } = b;
-    text(input.request_id);
+    input.request_id = requestId(input.request_id);
     if (method === "update") object(input.patch);
     if (method === "archive") versionRefs(input.items);
     if (method === "merge") {
@@ -666,7 +693,8 @@ export async function registerAdmin(
     return read("graph", subject(q), {
       type: q.type || undefined,
       focus_id: q.focus_id || undefined,
-      node_limit: integer(q.node_limit, 500, 500),
+      q: q.q === undefined ? undefined : optionalText(q.q, 200),
+      node_limit: integer(q.node_limit, 500, 5000),
       edge_limit: integer(q.edge_limit, 500, 500),
     });
   });
@@ -725,15 +753,15 @@ export async function registerAdmin(
   route("POST", "/config/preview", async (req) => {
     const b = body(req),
       config = await read<{ revision: number }>("getConfig");
-    if (config.revision !== b.expected_revision)
+    if (config.revision !== revision(b.expected_revision))
       throw new DomainError("REVISION_CONFLICT");
     return write("previewConfig", object(b.patch));
   });
   route("PATCH", "/config", async (req) => {
     const b = body(req);
     return write("updateConfig", {
-      expected_revision: b.expected_revision,
-      preview_token: b.preview_token,
+      expected_revision: revision(b.expected_revision),
+      preview_token: text(b.preview_token),
       patch: object(b.patch),
     });
   });
@@ -884,9 +912,7 @@ export async function registerAdmin(
     const id = text(body(req).backup_id);
     const row = await write<RecordData>("deleteBackup", id);
     const path = resolve(text(row.path));
-    const allowed = [resolve(options.backupDir), resolve(tmpdir())].some((dir) =>
-      path.startsWith(dir),
-    );
+    const allowed = withinAllowed(path, options.backupDir);
     let removed = false;
     if (allowed && existsSync(path)) {
       unlinkSync(path);
@@ -894,9 +920,14 @@ export async function registerAdmin(
     }
     return { deleted: true, file_removed: removed, path };
   });
-  route("POST", "/backups/inspect", async (req) =>
-    write("inspectBackup", resolve(text(body(req).path))),
-  );
+  route("POST", "/backups/inspect", async (req) => {
+    const path = resolve(text(body(req).path));
+    // R-01: inspectBackup 会以 readonly 打开任意 SQLite 文件并返回元数据/计数，
+    // 必须与 /backups/delete 一样限制在 backups 与 tmpdir 内，且用 sep 感知的包含性校验。
+    if (!withinAllowed(path, options.backupDir))
+      throw new DomainError("VALIDATION_ERROR");
+    return write("inspectBackup", path);
+  });
   route("GET", "/webdav", async () => cloud.status());
   route("POST", "/webdav", async (req) => {
     try {
@@ -1148,7 +1179,9 @@ export async function registerAdmin(
       );
       return String(raw.version ?? "0.0.0");
     } catch {
-      return "0.0.0";
+      // 单一版本真源 src/server/version.ts 读的是同一份 package.json；
+      // 安装目录临时不可读时用它兜底，避免更新检查误报 0.0.0。
+      return APP_VERSION;
     }
   };
   const compareVersions = (a: string, b: string) => {

@@ -15,7 +15,7 @@ CREATE TRIGGER IF NOT EXISTS detach_persona_delete BEFORE DELETE ON memories BEG
  UPDATE bot_profiles SET persona_memory_id=NULL,revision=revision+1,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE persona_memory_id=OLD.id;
 END;
 CREATE TRIGGER IF NOT EXISTS detach_persona_type AFTER UPDATE OF data ON memories WHEN json_extract(NEW.data,'$.type')<>'persona' BEGIN
- UPDATE bot_profiles SET persona_memory_id=NULL,revision=revision+1 WHERE persona_memory_id=NEW.id;
+ UPDATE bot_profiles SET persona_memory_id=NULL,revision=revision+1,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE persona_memory_id=NEW.id;
 END;
 CREATE TRIGGER IF NOT EXISTS detach_persona_update AFTER UPDATE OF status ON memories WHEN NEW.status<>'active' BEGIN
  UPDATE bot_profiles SET persona_memory_id=NULL,revision=revision+1,updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER) WHERE persona_memory_id=NEW.id;
@@ -30,6 +30,9 @@ CREATE TABLE IF NOT EXISTS memory_similarity(id TEXT PRIMARY KEY,subject_id TEXT
 CREATE INDEX IF NOT EXISTS similarity_source ON memory_similarity(subject_id,source_id,similarity);
 CREATE INDEX IF NOT EXISTS similarity_target ON memory_similarity(subject_id,target_id,similarity);
 CREATE TRIGGER IF NOT EXISTS similarity_scope_insert BEFORE INSERT ON memory_similarity BEGIN
+ SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM memories a JOIN memories b ON a.subject_id=b.subject_id WHERE a.id=NEW.source_id AND b.id=NEW.target_id AND a.subject_id=NEW.subject_id) THEN RAISE(ABORT,'SCOPE_VIOLATION') END;
+END;
+CREATE TRIGGER IF NOT EXISTS similarity_scope_update BEFORE UPDATE OF source_id,target_id,subject_id ON memory_similarity BEGIN
  SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM memories a JOIN memories b ON a.subject_id=b.subject_id WHERE a.id=NEW.source_id AND b.id=NEW.target_id AND a.subject_id=NEW.subject_id) THEN RAISE(ABORT,'SCOPE_VIOLATION') END;
 END;
 CREATE TRIGGER IF NOT EXISTS similarity_cleanup_delete BEFORE DELETE ON memories BEGIN

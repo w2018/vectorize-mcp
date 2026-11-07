@@ -349,11 +349,18 @@ function App() {
     </div>
   );
 }
-const ua = typeof navigator === "undefined" ? "" : navigator.userAgent;
-const mobileUA =
-  /Android|iPhone|iPod|iPad|Mobile|Windows Phone|webOS|BlackBerry/i.test(ua) ||
-  (/Macintosh/i.test(ua) && (navigator.maxTouchPoints || 0) > 1);
-document.documentElement.dataset.mobile = mobileUA ? "true" : "false";
+// D-19/R-04: decide the mobile layout by the same viewport query used by the
+// CSS media rules, and keep it in sync on resize / orientation changes. A
+// one-shot UA sniff disagrees with the stylesheet on narrow desktops and wide
+// touch devices.
+const mobileQuery = window.matchMedia("(max-width: 720px)");
+function syncMobileLayout() {
+  document.documentElement.dataset.mobile = mobileQuery.matches ? "true" : "false";
+}
+syncMobileLayout();
+mobileQuery.addEventListener("change", syncMobileLayout);
+window.addEventListener("resize", syncMobileLayout);
+window.addEventListener("orientationchange", syncMobileLayout);
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <App />

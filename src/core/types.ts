@@ -157,6 +157,8 @@ export interface Config {
   lexicalThreshold: number;
   semanticThreshold: number;
   similarityThreshold: number;
+  similarityBuildThreshold: number;
+  similarityFoldThreshold: number;
   importanceFactor: number;
   frequencyFactor: number;
   recencyFactor: number;
@@ -225,7 +227,9 @@ export interface SearchData {
   evaluation?: SearchEvaluation;
 }
 export interface Envelope<T> {
-  ok: true;
+  ok: boolean;
+  error?: {code:string;message:string;retryable:boolean};
+  state_token?: string;
   request_id?: string;
   data: T;
   meta: {
@@ -239,6 +243,8 @@ export interface MemoryFilters {
   status?: "active" | "archived";
   type?: MemoryType;
   query?: string;
+  /** Optional case-insensitive substring filter over title/content/keywords. */
+  q?: string;
   limit?: number;
   offset?: number;
   min_importance?: number;
@@ -335,6 +341,7 @@ export interface MemoryLink {
   updated_at: number;
 }
 export interface PreparedSearch {
+  rankedIds?: string[];
   warnings?: string[];
   ctx: Context;
   input: SearchInput;

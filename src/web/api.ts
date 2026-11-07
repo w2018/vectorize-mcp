@@ -185,6 +185,8 @@ export interface Config {
   minArchivedDays: number;
   allowInferredProfiles: boolean;
   similarityThreshold: number;
+  similarityBuildThreshold: number;
+  similarityFoldThreshold: number;
   embeddingModel: string;
   embeddingBaseUrl: string;
   embeddingDimension: number;

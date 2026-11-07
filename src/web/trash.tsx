@@ -33,12 +33,12 @@ export function Trash({ refresh }: { refresh: number }) {
   const action = useAction();
   const items = useResource<Page<TrashItemSummary>>(
     "/trash" + query({ kind, cursor, limit: 50 }),
-    refresh + version,
+    `${refresh}:${version}`,
   );
   const accounts = useResource<Page<Account>>("/accounts", refresh);
   const detail = useResource<TrashItemDetail>(
     detailId ? "/trash/" + encodeURIComponent(detailId) : null,
-    refresh + version,
+    `${refresh}:${version}`,
   );
   const reload = () => {
     setSelected([]);

@@ -237,10 +237,7 @@ export class MemoryService implements McpService<Context> {
         tool,
         input,
       );
-      if (replay) {
-        await this.validate(ctx);
-        return replay;
-      }
+      if (replay) return replay;
       let encoded: { text: string; vector: number[] } | undefined;
       if (
         tool === "memory_add" &&
@@ -279,7 +276,8 @@ export class MemoryService implements McpService<Context> {
       )
         await this.indexResult(ctx, result, embedding, encoded);
     }
-    await this.validate(ctx);
+    // store.execute/embeddingInput/setEmbedding each re-authorize internally;
+    // the post-write validate() here only added another cross-thread read.
     return result;
   }
   private async search(
@@ -376,7 +374,6 @@ export class MemoryService implements McpService<Context> {
     )
       return;
     // Keep the committed response unchanged: its idempotency snapshot describes the write, not a later index job.
-    await this.validate(ctx);
     const record = await this.database.read<IndexInput | null>(
       ctx.tokenId,
       "embeddingInput",
@@ -399,7 +396,6 @@ export class MemoryService implements McpService<Context> {
     } catch {
       return;
     } // Persisted pending state remains accurate and retryable.
-    await this.validate(ctx);
     const current = await this.encoder();
     if (!current || this.identity(current) !== modelIdentity) return;
     await this.database.write(

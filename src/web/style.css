@@ -1751,3 +1751,22 @@ html[data-mobile="true"] .login-card {
 html[data-mobile="true"] .login-card h1 {
   font-size: 26px;
 }
+/* R-04: landscape phones (e.g. 844x390) have very little vertical room. Keep
+   the galaxy visible instead of letting a 320px min-height push it below the
+   sticky topbar. Same specificity as the rules above, declared later. */
+@media (orientation: landscape) and (max-height: 520px) {
+  html[data-mobile="true"] .topbar {
+    min-height: 44px;
+    padding: 4px 10px;
+  }
+  html[data-mobile="true"] .graph-stage {
+    height: 60vh;
+    min-height: 0;
+  }
+  html[data-mobile="true"] .graph-side {
+    margin-bottom: 6px;
+  }
+  html[data-mobile="true"] .graph-detail {
+    margin-top: 6px;
+  }
+}

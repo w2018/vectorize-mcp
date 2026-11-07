@@ -384,7 +384,7 @@ export function Memories({
         cursor,
         limit: 20,
       }),
-    refresh + version,
+    `${refresh}:${version}`,
   );
   useEffect(() => {
     if (!detail) {

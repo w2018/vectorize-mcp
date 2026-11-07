@@ -100,6 +100,8 @@ type Pending = {
   body: Record<string, unknown>;
   capture?: boolean;
   label?: string;
+  /** Endpoint that can issue a fresh preview_token after one has been consumed. */
+  previewPath?: string;
 };
 export function Accounts({
   refresh,
@@ -116,11 +118,25 @@ export function Accounts({
   const [presetId, setPresetId] = useState("gentle");
   const presets = useResource<Page<BotPreset>>("/qqbot/presets", 0);
   const [issued, setIssued] = useState<IssuedCredential[]>([]);
+  const [issueWarning, setIssueWarning] = useState("");
   const [accessOpen, setAccessOpen] = useState(false);
   const [accessTokenId, setAccessTokenId] = useState<string | null>(null);
   const [accessFormat, setAccessFormat] = useState<McpFormat>("opencode");
   const [pending, setPending] = useState<Pending | null>(null);
   const [deleting, setDeleting] = useState<Account | null>(null);
+  /** D-18: after a failed confirm the preview_token is consumed; re-issue it
+   *  rather than replaying an expired one on "retry". */
+  function regeneratePending() {
+    if (!pending?.previewPath) return;
+    void action.run(async () => {
+      const value = await api<Preview>(
+        pending.previewPath!,
+        "POST",
+        writeBody({}),
+      );
+      setPending((current) => (current ? { ...current, value } : current));
+    }, "");
+  }
   const accessRef = useRef<HTMLDetailsElement | null>(null);
   type TokenResponse = {
     id?: string;
@@ -132,8 +148,15 @@ export function Accounts({
   };
   function rememberIssued(result: TokenResponse, fallback: string) {
     const token = result.token || result.secret;
-    if (!token)
-      throw new Error("凭据已创建，但无法再次显示。请撤销该凭据后重新创建。");
+    // D-18: the credential was already created successfully. A missing plaintext
+    // is a display problem, not a failed operation — never throw here, or the
+    // ConfirmDialog would offer a retry that replays a consumed preview_token.
+    if (!token) {
+      setIssueWarning("凭据已创建，但服务端未返回明文；请撤销该凭据后重新创建。");
+      setAccessOpen(true);
+      return;
+    }
+    setIssueWarning("");
     const record: IssuedCredential = {
       id: result.id ?? token.slice(0, 12),
       label: result.label ?? fallback,
@@ -201,6 +224,7 @@ export function Accounts({
         title: "重新签发访问凭据",
         value,
         path: "/tokens/" + token.id + "/rotate",
+        previewPath: "/tokens/" + token.id + "/rotate-preview",
         body: {},
         capture: true,
         label: token.label,
@@ -354,6 +378,7 @@ export function Accounts({
                               title: "撤销访问凭据",
                               value,
                               path: "/tokens/" + t.id + "/revoke",
+                              previewPath: "/tokens/" + t.id + "/revoke-preview",
                               body: {},
                             });
                           }, "")
@@ -376,6 +401,7 @@ export function Accounts({
                                 title: "删除已撤销凭据到回收站",
                                 value,
                                 path: "/tokens/" + t.id + "/delete",
+                              previewPath: "/tokens/" + t.id + "/delete-preview",
                                 body: {},
                               });
                             }, "")
@@ -401,6 +427,7 @@ export function Accounts({
             接入方式 <span>（示例配置，可一键复制）</span>
           </summary>
           <div className="access-body">
+            {issueWarning && <div className="notice warning">{issueWarning}</div>}
             {!activeTokens.length ? (
               <p>暂无可用的有效凭据，请先在下方创建或重新启用。</p>
             ) : (
@@ -569,6 +596,7 @@ export function Accounts({
                           title: "重新启用原账户",
                           value,
                           path: "/tokens",
+                          previewPath: "/accounts/" + a.id + "/enable-preview",
                           body: { subject_id: a.id, label: a.name },
                         });
                       }, "")
@@ -592,6 +620,7 @@ export function Accounts({
         <ConfirmDialog
           title={pending.title}
           onClose={() => setPending(null)}
+          onRetry={pending.previewPath ? regeneratePending : undefined}
           onConfirm={async () => {
             const result = await api<TokenResponse>(
               pending.path,
@@ -911,7 +940,7 @@ export function Backups({
   subject: string;
 }) {
   const [version, setVersion] = useState(0);
-  const backups = useResource<Page<Backup>>("/backups", refresh + version);
+  const backups = useResource<Page<Backup>>("/backups", `${refresh}:${version}`);
   const action = useAction();
   const [pending, setPending] = useState<{
     backup_id: string;
@@ -923,7 +952,7 @@ export function Backups({
   const [cloudRemoving, setCloudRemoving] = useState<CloudFile | null>(null);
   const [cloudOpen, setCloudOpen] = useState(false);
   const [cloudVersion, setCloudVersion] = useState(0);
-  const cloud = useResource<WebdavStatus>("/webdav", refresh + cloudVersion);
+  const cloud = useResource<WebdavStatus>("/webdav", `${refresh}:${cloudVersion}`);
   const [form, setForm] = useState({
     provider: "jianguoyun" as "jianguoyun" | "custom",
     url: "https://dav.jianguoyun.com/dav/",
@@ -1381,10 +1410,10 @@ const fields: {
   {
     key: "tokenBudget",
     label: "最多带回多少内容",
-    help: "以估算 token 计；不会截断事实限定词。",
+    help: "与 estimated_tokens 同为响应 data 的 UTF-8 字节数；不会截断事实限定词。",
     min: 128,
     max: 1200,
-    defaultValue: "600",
+    defaultValue: "1200",
   },
   {
     key: "halfLifeDays",
@@ -1478,6 +1507,26 @@ const fields: {
     advanced: true,
   },
   {
+    key: "similarityBuildThreshold",
+    label: "相似关系构建阈值",
+    help: "重建相似关系时，内容相似度达到此值才生成自动关系；0.3～0.95。",
+    min: 0.3,
+    max: 0.95,
+    step: 0.01,
+    defaultValue: "0.55",
+    advanced: true,
+  },
+  {
+    key: "similarityFoldThreshold",
+    label: "检索折叠阈值",
+    help: "检索时把相似度达到此值的候选折叠成一条代表，避免重复内容占满预算；0.5～1。",
+    min: 0.5,
+    max: 1,
+    step: 0.01,
+    defaultValue: "0.8",
+    advanced: true,
+  },
+  {
     key: "protectedImportance",
     label: "受保护的重要程度",
     help: "达到此值或画像类型的记忆不允许助手普通归档。",
@@ -1531,7 +1580,7 @@ const fields: {
 ];
 export function Settings({ refresh }: { refresh: number }) {
   const [version, setVersion] = useState(0);
-  const config = useResource<Config>("/config", refresh + version);
+  const config = useResource<Config>("/config", `${refresh}:${version}`);
   const [draft, setDraft] = useState<Config | null>(null);
   const [advanced, setAdvanced] = useState(false);
   const [search, setSearch] = useState("");

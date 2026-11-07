@@ -79,8 +79,8 @@ const base: BotSettings = {
   tool_rules: ["敏感操作先确认"],
   group_policy: "被提及时回应，避免刷屏",
   private_policy: "尊重用户意愿",
-  search_types: ["fact", "preference", "person", "concept"],
-  token_budget: 600,
+  search_types: MEMORY_CATALOG.map(t=>t.key),
+  token_budget: 1200,
 };
 export const BOT_PRESETS: BotPreset[] = [
   [

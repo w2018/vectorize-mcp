@@ -53,14 +53,14 @@ export function QQBot({
   const [writeExamples, setWriteExamples] = useState(false);
   const profile = useResource<BotProfile>(
     botSubject ? "/qqbot" + query({ subject_id: botSubject }) : null,
-    refresh + version,
+    `${refresh}:${version}`,
   );
   const presets = useResource<Page<BotPreset>>("/qqbot/presets", refresh);
   const bootstrap = useResource<Bootstrap>(
     tab === "context" && botSubject
       ? "/qqbot/bootstrap" + query({ subject_id: botSubject, token_budget: budget })
       : null,
-    refresh + version,
+    `${refresh}:${version}`,
   );
   const action = useAction();
   useEffect(() => { if (profile.data) setDraft(structuredClone(profile.data.settings)); }, [profile.data]);
