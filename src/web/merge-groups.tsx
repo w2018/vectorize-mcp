@@ -44,16 +44,23 @@ export function MergeGroupsPanel({
     setLoading(true);
     setError("");
     try {
-      const data = await api<{ items: SimilarityGroup[]; total: number }>(
-        "/maintenance/groups?subject_id=" + encodeURIComponent(subject) + "&limit=200",
-      );
+      const [data, history, active] = await Promise.all([
+        api<{ items: SimilarityGroup[]; total: number }>(
+          "/maintenance/groups?subject_id=" + encodeURIComponent(subject) + "&status=proposed&limit=200",
+        ),
+        api<{ items: MergeBatch[] }>(
+          "/maintenance/batches?subject_id=" + encodeURIComponent(subject) + "&limit=5",
+        ),
+        api<MaintenanceJob | null>(
+          "/maintenance/jobs/active?subject_id=" + encodeURIComponent(subject),
+        ),
+      ]);
       setGroups(data.items);
       setTotal(data.total);
       setSelected((prev) => new Set([...prev].filter((id) => data.items.some((g) => g.id === id))));
-      const history = await api<{ items: MergeBatch[] }>(
-        "/maintenance/batches?subject_id=" + encodeURIComponent(subject) + "&limit=5",
-      );
       setBatches(history.items);
+      // 刷新页面后从服务端接续仍在运行的任务，避免进度条消失又重建触发 JOB_BUSY。
+      if (active && (active.status === "queued" || active.status === "running")) setJob(active);
     } catch (e) {
       setError(e instanceof Error ? e.message : "加载分组失败");
     } finally {
@@ -101,6 +108,23 @@ export function MergeGroupsPanel({
     }
   };
 
+  /** 遇到 JOB_BUSY 时接续服务端已有任务，而不是让用户以为需要再点一次。 */
+  const resumeActiveJob = async (fallback: string) => {
+    try {
+      const active = await api<MaintenanceJob | null>(
+        "/maintenance/jobs/active?subject_id=" + encodeURIComponent(subject),
+      );
+      if (active && (active.status === "queued" || active.status === "running")) {
+        setJob(active);
+        setNotice("已有任务正在运行，已接续显示进度。");
+        return;
+      }
+    } catch {
+      /* 忽略接续查询失败，回落到原错误 */
+    }
+    setError(fallback);
+  };
+
   const rebuild = async () => {
     setBusy("rebuild");
     setError("");
@@ -117,7 +141,9 @@ export function MergeGroupsPanel({
       );
       setJob(created);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "建组失败");
+      const message = e instanceof Error ? e.message : "建组失败";
+      if (message.includes("JOB_BUSY")) await resumeActiveJob(message);
+      else setError(message);
     } finally {
       setBusy("");
     }
@@ -166,7 +192,9 @@ export function MergeGroupsPanel({
       setJob(created);
       setDraft(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "合并任务创建失败");
+      const message = e instanceof Error ? e.message : "合并任务创建失败";
+      if (message.includes("JOB_BUSY")) await resumeActiveJob(message);
+      else setError(message);
     } finally {
       setBusy("");
     }
@@ -174,7 +202,12 @@ export function MergeGroupsPanel({
 
   const viewBatch = async (batchId: string) => {
     try {
-      setBatchView(await api<MergeBatch>("/maintenance/batches/" + encodeURIComponent(batchId)));
+      setBatchView(
+        await api<MergeBatch>(
+          "/maintenance/batches/" + encodeURIComponent(batchId) +
+            "?subject_id=" + encodeURIComponent(subject),
+        ),
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : "读取合并结果失败");
     }
@@ -453,33 +486,73 @@ export function MergeGroupsPanel({
       {batchView && (
         <div className="modal-backdrop">
           <div className="modal merge-compare">
-            <h3>合并结果对比（可逐组撤回）</h3>
-            {batchView.detail.map((entry) => (
-              <div className="compare-group" key={entry.group_id}>
-                <div className="compare-cols">
-                  <div>
-                    <h4>合并前（{entry.before?.length ?? 0} 条）</h4>
-                    {(entry.before ?? []).map((m) => (
-                      <div className="compare-item" key={m.id}>
-                        <strong>{m.title || "未命名"}</strong>
-                        <span className="muted">（{m.type} · {m.score.toFixed(3)}）</span>
-                        <p>{m.content}</p>
-                      </div>
-                    ))}
+            <div className="merge-compare-head">
+              <div>
+                <h3>合并结果对比</h3>
+                <p className="muted">
+                  {new Date(Number(batchView.created_at)).toLocaleString()} · 共 {batchView.groups} 组
+                </p>
+              </div>
+              <span className={"batch-status " + batchView.status}>
+                {batchView.status === "done" ? "已完成" : "已撤销"}
+              </span>
+            </div>
+            {batchView.detail.length === 0 ? (
+              <p className="muted">该批次没有可显示的合并明细。</p>
+            ) : (
+              batchView.detail.map((entry, index) => (
+                <div className="compare-card" key={entry.group_id}>
+                  <div className="compare-card-head">
+                    <strong>第 {index + 1} 组</strong>
+                    <span className="muted">
+                      {entry.before?.length ?? 0} 条合并为 1 条
+                      {entry.after?.type ? " · " + entry.after.type : ""}
+                    </span>
                   </div>
-                  <div>
-                    <h4>合并后（1 条）</h4>
-                    {entry.after?.title && <p><strong>{entry.after.title}</strong></p>}
-                    <p>{entry.after?.content}</p>
-                    {entry.after?.reason && <p className="muted">{entry.after.reason}</p>}
+                  <div className="compare-cols">
+                    <div className="compare-col">
+                      <h4 className="compare-col-title">合并前（{entry.before?.length ?? 0} 条）</h4>
+                      {(entry.before ?? []).length === 0 ? (
+                        <p className="muted">该批次未保存合并前快照。</p>
+                      ) : (
+                        (entry.before ?? []).map((m) => (
+                          <div className="compare-item" key={m.id}>
+                            <div className="compare-item-head">
+                              <strong>{m.title || "未命名"}</strong>
+                              <span className="tag">{m.type || "未分类"}</span>
+                              <span className="muted">
+                                {m.score > 0 ? "相似度 " + m.score.toFixed(3) : "旧批次无相似度"}
+                              </span>
+                            </div>
+                            <p>{m.content}</p>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                    <div className="compare-col">
+                      <h4 className="compare-col-title">合并后（1 条）</h4>
+                      <div className="compare-item compare-after">
+                        {entry.after?.title && <strong>{entry.after.title}</strong>}
+                        <p>{entry.after?.content || "该批次未保存合并后内容。"}</p>
+                        {entry.after?.reason && (
+                          <p className="muted compare-reason">合并原因：{entry.after.reason}</p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="compare-card-actions">
+                    <button
+                      className="link"
+                      disabled={busy !== ""}
+                      onClick={() => undo(batchView.id, [entry.group_id])}
+                    >
+                      撤销这一组
+                    </button>
                   </div>
                 </div>
-                <button className="link" disabled={busy !== ""} onClick={() => undo(batchView.id, [entry.group_id])}>
-                  撤销这一组
-                </button>
-              </div>
-            ))}
-            <div className="maintenance-row">
+              ))
+            )}
+            <div className="maintenance-row merge-compare-foot">
               <button disabled={busy !== ""} onClick={() => undo(batchView.id)}>撤销整批</button>
               <button disabled={busy !== ""} onClick={() => setBatchView(null)}>关闭</button>
             </div>

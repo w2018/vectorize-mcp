@@ -3051,7 +3051,55 @@ export class Store {
       subjectId,
     ) as (Omit<MergeBatch, "detail"> & { detail: string }) | undefined;
     if (!row) return null;
-    return { ...row, detail: JSON.parse(row.detail || "[]") } as unknown as MergeBatch;
+    const detail = JSON.parse(row.detail || "[]") as {
+      group_id: string;
+      target_id: string;
+      new_revision: number;
+      archived: { id: string; revision: number }[];
+      before?: { id: string; title?: string; content: string; score: number; type?: string }[];
+      after?: { title?: string; content: string; type: string; reason: string };
+    }[];
+    const memoryData = (id: string): Memory | null => {
+      const found = this.row("SELECT data FROM memories WHERE id=?", id) as { data: string } | undefined;
+      if (!found) return null;
+      try {
+        return JSON.parse(found.data) as Memory;
+      } catch {
+        return null;
+      }
+    };
+    // 旧批次（v0.6.2）只存 archived/target id，未保存 before/after 文本；
+    // 读取时按当时归档的 id 还原快照，避免「查看对比」里一片空白。
+    for (const entry of detail) {
+      if (!entry.before || entry.before.length === 0) {
+        entry.before = (entry.archived ?? [])
+          .map((item) => {
+            const memory = memoryData(item.id);
+            return memory
+              ? {
+                  id: item.id,
+                  title: memory.title,
+                  content: memory.content,
+                  score: 0,
+                  type: memory.type,
+                }
+              : null;
+          })
+          .filter((item): item is NonNullable<typeof item> => item !== null);
+      }
+      if (!entry.after || !entry.after.content) {
+        const memory = memoryData(entry.target_id);
+        if (memory) {
+          entry.after = {
+            title: memory.title,
+            content: memory.content,
+            type: memory.type,
+            reason: "该批次创建时未保存合并原因。",
+          };
+        }
+      }
+    }
+    return { ...row, detail } as unknown as MergeBatch;
   }
   listMergeBatches(subjectId: string, limit = 20): { items: MergeBatch[] } {
     this.adminFor(subjectId);
@@ -3132,6 +3180,15 @@ export class Store {
         jobId,
       );
     return next;
+  }
+  /** 当前账户仍在排队/运行的任务（刷新页面后用于接续进度，避免丢失 job id）。 */
+  getActiveMaintenanceJob(subjectId: string): MaintenanceJob | null {
+    this.adminFor(subjectId);
+    const row = this.row(
+      "SELECT id FROM maintenance_jobs WHERE subject_id=? AND status IN ('queued','running') ORDER BY created_at DESC LIMIT 1",
+      subjectId,
+    ) as { id: string } | undefined;
+    return row ? this.getMaintenanceJob(row.id) : null;
   }
   getMaintenanceJob(jobId: string): MaintenanceJob | null {
     const row = this.row("SELECT * FROM maintenance_jobs WHERE id=?", jobId) as

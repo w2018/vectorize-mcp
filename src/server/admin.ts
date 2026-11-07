@@ -185,6 +185,7 @@ export async function registerAdmin(
       previewMerge(subjectId: string, groupId: string): Promise<unknown>;
       startMerge(subjectId: string, groupIds: string[]): Promise<unknown>;
       getJob(jobId: string): Promise<unknown>;
+      getActiveJob(subjectId: string): Promise<unknown>;
       cancelJob(jobId: string): Promise<unknown>;
       undoBatch(subjectId: string, batchId: string, groupIds?: string[]): Promise<unknown>;
       getBatch(subjectId: string, batchId: string): Promise<unknown>;
@@ -718,7 +719,9 @@ export async function registerAdmin(
     const m = options.maintenance;
     if (!m) throw new DomainError("FEATURE_DISABLED");
     const b = body(req);
-    return m.previewMerge(subject(b), text(b.group_id));
+    const groupId = typeof b.group_id === "string" ? b.group_id.trim() : "";
+    if (!groupId) throw new DomainError("VALIDATION_ERROR", "请选择要预览的分组。");
+    return m.previewMerge(subject(b), groupId);
   });
   route("POST", "/maintenance/merge", async (req) => {
     const m = options.maintenance;
@@ -729,6 +732,14 @@ export async function registerAdmin(
       : [];
     if (!ids.length) throw new DomainError("VALIDATION_ERROR", "请至少选择一个分组。");
     return m.startMerge(subject(b), ids);
+  });
+  route("GET", "/maintenance/jobs/active", async (req) => {
+    const m = options.maintenance;
+    if (!m) throw new DomainError("FEATURE_DISABLED");
+    const q = query(req);
+    const subjectId = typeof q.subject_id === "string" ? q.subject_id.trim() : "";
+    if (!subjectId) throw new DomainError("VALIDATION_ERROR", "缺少账户 ID，无法查询任务。");
+    return m.getActiveJob(subjectId);
   });
   route("GET", "/maintenance/jobs/:id", async (req) => {
     const m = options.maintenance;
@@ -749,7 +760,10 @@ export async function registerAdmin(
   route("GET", "/maintenance/batches/:id", async (req) => {
     const m = options.maintenance;
     if (!m) throw new DomainError("FEATURE_DISABLED");
-    return m.getBatch(subject(query(req)), param(req));
+    const q = query(req);
+    const subjectId = typeof q.subject_id === "string" ? q.subject_id.trim() : "";
+    if (!subjectId) throw new DomainError("VALIDATION_ERROR", "缺少账户 ID，无法读取合并批次。");
+    return m.getBatch(subjectId, param(req));
   });
   route("POST", "/maintenance/merge/undo", async (req) => {
     const m = options.maintenance;

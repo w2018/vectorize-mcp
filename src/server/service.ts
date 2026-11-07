@@ -608,12 +608,14 @@ export class MemoryService implements McpService<Context> {
     const model = (config?.llmModel ?? "").trim() || (this.env.EMBEDDING_MODEL ?? "");
     return { enabled: Boolean(baseUrl && model), baseUrl, model };
   }
-  private chatModel(baseUrl: string, model: string, apiKey?: string): ChatModel {
+  private chatModel(baseUrl: string, model: string, apiKey?: string, timeoutMs?: number): ChatModel {
     return new ChatModel({
       baseUrl,
       model,
       apiKey: apiKey?.trim() || this.apiKey() || undefined,
-      timeoutMs: Number(this.env.EMBEDDING_TIMEOUT_MS ?? 60000),
+      timeoutMs: timeoutMs ?? Number(this.env.EMBEDDING_TIMEOUT_MS ?? 60000),
+      // Hy 系列是推理模型：默认 high 会把 2048 token 全花在思考上，content 为空且经常超过 30s。
+      reasoningEffort: /(^|[/])hy\d/i.test(model) ? "low" : undefined,
     });
   }
   /** 设置页「测试连接」：用草稿配置真实发一条 chat，验证地址、模型名与密钥。 */
@@ -808,6 +810,9 @@ export class MemoryService implements McpService<Context> {
   async getMaintenanceJob(jobId: string) {
     return this.database.read("jobs", "getMaintenanceJob", jobId);
   }
+  async getActiveMaintenanceJob(subjectId: string) {
+    return this.database.read("jobs", "getActiveMaintenanceJob", subjectId);
+  }
   async startRebuildGroupsJob(
     subjectId: string,
     options: { limit?: number; groupThreshold?: number; basis?: "lexical" | "llm" } = {},
@@ -974,11 +979,43 @@ export class MemoryService implements McpService<Context> {
       groupId,
     );
     if (!group) throw new DomainError("NOT_FOUND");
-    return this.buildMergeDraft(subjectId, group);
+    try {
+      // 必须留出余量小于 Fastify connectionTimeout(60s)，否则连接先被关闭、前端只会收到网络错误。
+      // 推理模型需要预留 2048 tokens 让思考过程结束并输出 JSON。
+      return await this.buildMergeDraft(subjectId, group, 45000, 2048);
+    } catch (error) {
+      // 预览是交互动作，不能让用户在 30s 网关超时后只看到报错：
+      // 模型失败/超时时先给出一份可编辑的本地草稿，真正合并仍走后台模型任务。
+      if (error instanceof DomainError && error.code === "GROUP_TOO_SMALL") throw error;
+      return this.localMergeDraft(group, this.readableModelError(error));
+    }
+  }
+  /** 模型不可用时的本地合并草稿：取信息量最大的一条，保留原始事实，不编造。 */
+  private localMergeDraft(group: SimilarityGroup, reason: string) {
+    const members = [...(group.members ?? [])].sort((a, b) => {
+      const lengthDiff = String(b.content ?? "").length - String(a.content ?? "").length;
+      return lengthDiff !== 0 ? lengthDiff : b.score - a.score;
+    });
+    const primary = members[0];
+    const content = String(primary?.content ?? "").trim();
+    return {
+      group_id: group.id,
+      title: primary?.title,
+      content,
+      type: String(primary?.type ?? "fact"),
+      keywords: [] as string[],
+      importance: primary?.importance,
+      reason:
+        "模型未能在时限内返回，已先用组内信息量最大的一条作为草稿；" +
+        "请核对标题与正文后再确认合并。" +
+        (reason ? "（" + reason + "）" : ""),
+    };
   }
   private async buildMergeDraft(
     subjectId: string,
     group: SimilarityGroup,
+    timeoutMs?: number,
+    maxTokens = 2048,
   ): Promise<{
     group_id: string;
     title?: string;
@@ -996,7 +1033,7 @@ export class MemoryService implements McpService<Context> {
       );
     const members = group.members ?? [];
     if (members.length < 2) throw new DomainError("GROUP_TOO_SMALL");
-    const model = this.chatModel(config.baseUrl, config.model);
+    const model = this.chatModel(config.baseUrl, config.model, undefined, timeoutMs);
     const listing = members
       .map(
         (m, index) =>
@@ -1023,7 +1060,7 @@ export class MemoryService implements McpService<Context> {
         { role: "system", content: "你是严谨的记忆库整理助手，只输出 JSON。" },
         { role: "user", content: prompt },
       ],
-      2048,
+      maxTokens,
     );
     const first = reply.indexOf("{");
     const last = reply.lastIndexOf("}");

@@ -1884,8 +1884,25 @@ button,
 .compare-item { border-bottom: 1px dashed #e2e2e2; padding: 6px 0; }
 .compare-item p { margin: 2px 0 0; white-space: pre-wrap; }
 .compare-group { border-top: 1px solid #e2e2e2; padding: 10px 0; }
-.modal.merge-compare { width: min(980px, 94vw); }
+.modal.merge-compare { width: min(1040px, 95vw); }
 .modal.merge-preview { width: min(980px, 94vw); }
+/* v0.6.4 合并批次对比：卡片化、状态徽标与可滚动内容区 */
+.merge-compare-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.merge-compare-head h3 { margin: 0 0 4px; }
+.merge-compare-head p { margin: 0; }
+.batch-status { flex: 0 0 auto; border-radius: 999px; padding: 3px 10px; font-size: 12px; font-weight: 600; }
+.batch-status.done { color: #17663a; background: #e7f6ec; }
+.batch-status.undone { color: #8a5a00; background: #fff4d6; }
+.compare-card { border: 1px solid #e1e8e3; border-radius: 10px; padding: 12px; margin: 10px 0; background: #fff; }
+.compare-card-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 8px; }
+.compare-col { background: #f7f9f8; border: 1px solid #edf1ee; border-radius: 8px; padding: 10px; min-width: 0; }
+.compare-col-title { margin: 0 0 8px; font-size: 13px; color: #456052; }
+.compare-item-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.compare-item p { overflow-wrap: anywhere; }
+.compare-after { border-bottom: 0; }
+.compare-reason { margin-top: 8px !important; padding-top: 8px; border-top: 1px dashed #dbe5de; }
+.compare-card-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+.merge-compare-foot { margin-top: 12px; padding-top: 12px; border-top: 1px solid #e1e8e3; }
 @media (max-width: 720px) {
   html[data-mobile="true"] section.panel.padded,
   html[data-mobile="true"] .maintenance-row,
@@ -1912,3 +1929,12 @@ html[data-mobile="true"] .maintenance-row .inline-field { flex: 1 1 100%; min-wi
 html[data-mobile="true"] .maintenance-row .inline-field select,
 html[data-mobile="true"] .maintenance-row .inline-field input { width: 100%; min-width: 0; }
 html[data-mobile="true"] .maintenance-row button { width: 100%; }
+
+/* v0.6.4 手机端：合并对比卡片单列、头部纵向排列 */
+html[data-mobile="true"] .merge-compare-head { flex-direction: column; align-items: stretch; }
+html[data-mobile="true"] .compare-card { padding: 10px; }
+html[data-mobile="true"] .compare-card-head { flex-direction: column; align-items: flex-start; gap: 4px; }
+html[data-mobile="true"] .compare-card-actions { justify-content: stretch; }
+html[data-mobile="true"] .compare-card-actions button { width: 100%; padding: 10px; }
+html[data-mobile="true"] .merge-compare-foot { border-top: 0; padding-top: 0; }
+html[data-mobile="true"] .modal.merge-compare { padding: 14px; }

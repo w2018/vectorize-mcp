@@ -4,6 +4,8 @@ export interface ChatModelOptions {
   model: string;
   apiKey?: string;
   timeoutMs?: number;
+  /** 推理型模型可降档，避免思考 token 吃满上限后 content 为空或请求超时。 */
+  reasoningEffort?: "low" | "high";
 }
 
 export interface ChatMessage {
@@ -41,6 +43,9 @@ export class ChatModel {
           messages,
           temperature: 0,
           max_tokens: maxTokens,
+          ...(this.options.reasoningEffort
+            ? { reasoning_effort: this.options.reasoningEffort }
+            : {}),
         }),
       });
       const text = await res.text();
@@ -55,7 +60,7 @@ export class ChatModel {
         throw new Error("模型服务返回 HTTP " + res.status + "：" + detail);
       }
       let body: {
-        choices?: { message?: { content?: string } }[];
+        choices?: { message?: { content?: string }; finish_reason?: string }[];
       } = {};
       try {
         body = JSON.parse(text);
@@ -63,8 +68,14 @@ export class ChatModel {
         throw new Error("模型返回的不是合法 JSON");
       }
       const content = body.choices?.[0]?.message?.content;
-      if (typeof content !== "string" || !content.trim())
-        throw new Error("模型没有返回内容");
+      if (typeof content !== "string" || !content.trim()) {
+        const finish = body.choices?.[0]?.finish_reason;
+        throw new Error(
+          "模型没有返回内容" +
+            (finish ? "（finish_reason=" + finish + "）" : "") +
+            "；若为推理模型，请降低推理档位或提高 max_tokens。",
+        );
+      }
       return content;
     } finally {
       clearTimeout(timer);

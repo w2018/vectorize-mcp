@@ -41,8 +41,8 @@ export async function buildApp(options: AppOptions) {
   const app = Fastify({
     logger: false,
     bodyLimit: 1024 * 1024,
-    requestTimeout: 30000,
-    connectionTimeout: 15000,
+    requestTimeout: 60000,
+    connectionTimeout: 60000,
     trustProxy: false,
   });
   try {
@@ -242,6 +242,7 @@ export async function buildApp(options: AppOptions) {
         previewMerge: (subjectId, groupId) => service.previewMergeGroup(subjectId, groupId),
         startMerge: (subjectId, groupIds) => service.startMergeGroupsJob(subjectId, groupIds),
         getJob: (jobId) => service.getMaintenanceJob(jobId),
+        getActiveJob: (subjectId) => service.getActiveMaintenanceJob(subjectId),
         cancelJob: (jobId) => service.cancelMaintenanceJob(jobId),
         undoBatch: (subjectId, batchId, groupIds) =>
           service.undoMergeBatch(subjectId, batchId, groupIds),
