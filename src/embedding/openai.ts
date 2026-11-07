@@ -149,13 +149,24 @@ export class OpenAIEmbedding {
         model?: unknown;
         data?: Array<{ embedding?: unknown; index?: unknown }>;
       };
-      if (payload.model !== this.descriptor.model)
-        throw new EmbeddingError("Embedding model mismatch");
-      if (
-        !Array.isArray(payload.data) ||
-        payload.data.length !== 1 ||
-        payload.data[0]?.index !== 0
-      )
+      // 部分网关（如聚合中转）会把带前缀的模型名归一化成裸名回显：
+      // 请求 "workbuddy/bge-m3" 却返回 "bge-m3"。只要回显是本模型名的最后一段就放行，
+      // 否则每条记忆都会因 "Embedding model mismatch" 编码失败、检索永远退回词法。
+      const echoed = typeof payload.model === "string" ? payload.model : "";
+      const expected = this.descriptor.model;
+      if (echoed !== expected && !(echoed && expected.endsWith("/" + echoed)))
+        throw new EmbeddingError(
+          "Embedding model mismatch: requested " +
+            expected +
+            ", provider echoed " +
+            (echoed || "(none)"),
+        );
+      // 有的 OpenAI 兼容网关不返回 data[].index（例如本地聚合网关），
+      // 这里只在 index 明确存在且不是 0 时才拒绝，避免整条链路被判为无效响应。
+      if (!Array.isArray(payload.data) || payload.data.length !== 1)
+        throw new EmbeddingError("Invalid embedding response items");
+      const itemIndex = (payload.data[0] as { index?: unknown }).index;
+      if (typeof itemIndex === "number" && itemIndex !== 0)
         throw new EmbeddingError("Invalid embedding response items");
       const vector = payload.data[0].embedding;
       if (

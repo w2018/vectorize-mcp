@@ -356,9 +356,15 @@ export class MemoryService implements McpService<Context> {
             vector: await embedding.embed(input.query),
           },
         };
-      } catch {
+      } catch (error) {
+        // 把编码失败的真实原因带出来（模型名不匹配 / 维度不符 / HTTP 401…），
+        // 否则用户只看到「语义编码失败」，无从判断该改哪一个设置。
+        const reason =
+          error instanceof Error && error.message ? error.message : "unknown error";
         warning =
-          "EMBEDDING_UNAVAILABLE: semantic encoding failed; lexical fallback only.";
+          "EMBEDDING_UNAVAILABLE: semantic encoding failed (" +
+          reason.slice(0, 200) +
+          "); lexical fallback only.";
       }
     } else if (this.encoderFailure)
       // 配置有值但编码器无法构造（地址非法/维度为 0）：必须说明真实原因，
@@ -564,12 +570,36 @@ export class MemoryService implements McpService<Context> {
       if (input.dimension && (response.status === 400 || response.status === 422))
         response = await send(false);
       if (!response.ok) {
+        // 网关常把真实原因放在响应体里（例如「embedding model [hy3] not found」），
+        // 只报 HTTP 500 用户无法判断是模型名错、维度错还是服务端故障。
+        const body = await response.text().catch(() => "");
+        let reason = body.slice(0, 300).replace(/\s+/g, " ").trim();
+        try {
+          const parsed = JSON.parse(body) as {
+            error?: { message?: unknown } | string;
+            message?: unknown;
+          };
+          const nested =
+            parsed.error && typeof parsed.error === "object" && typeof parsed.error.message === "string"
+              ? parsed.error.message
+              : typeof parsed.message === "string"
+                ? parsed.message
+                : typeof parsed.error === "string"
+                  ? parsed.error
+                  : "";
+          if (nested) reason = nested.replace(/\s+/g, " ").trim().slice(0, 300);
+        } catch {
+          /* keep raw text */
+        }
         const detail =
           response.status === 401 || response.status === 403
             ? "鉴权失败：API Key 无效或未设置。"
             : response.status === 404
               ? "接口不存在：确认地址是 OpenAI 兼容基址，且不要包含 /embeddings 后缀。"
-              : "服务拒绝请求（HTTP " + response.status + "）。";
+              : "服务拒绝请求（HTTP " +
+                response.status +
+                "）" +
+                (reason ? "：" + reason : "。");
         return { ok: false, error: detail };
       }
       const payload: unknown = await response.json();

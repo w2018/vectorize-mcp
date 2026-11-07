@@ -964,9 +964,10 @@ export function Backups({
     password: "",
     root: "vectorize-mcp",
   });
-  const [formLoaded, setFormLoaded] = useState(false);
-  if (!formLoaded && cloud.data) {
-    setFormLoaded(true);
+  // 云端表单必须跟随服务端已保存的值：之前在渲染期只填一次（formLoaded 门控），
+  // 保存后或别处改动 WebDAV 配置再回来时会显示旧值，看起来像「没读回配置」。
+  useEffect(() => {
+    if (!cloud.data) return;
     setForm({
       provider: cloud.data.provider,
       url: cloud.data.url,
@@ -974,7 +975,7 @@ export function Backups({
       password: "",
       root: cloud.data.root,
     });
-  }
+  }, [cloud.data]);
   const [files, setFiles] = useState<CloudFile[] | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const [job, setJob] = useState<CloudJob | null>(null);
@@ -1423,10 +1424,11 @@ function EncoderSettings({
   const [busy, setBusy] = useState<"none" | "test" | "models" | "key">("none");
   const [error, setError] = useState("");
 
+  // 预设下拉要与服务端已保存的配置保持一致：之前只在首次加载时赋值一次，
+  // 保存后（active 变化）或刷新页面回来时不会同步，看起来像「配置没读回来」。
   useEffect(() => {
-    if (selected || !presets.data) return;
-    setSelected(presets.data.active);
-  }, [presets.data, selected]);
+    if (presets.data) setSelected(presets.data.active);
+  }, [presets.data]);
 
   useEffect(() => {
     if (presets.data?.key) setKeyState(presets.data.key);
@@ -2041,9 +2043,9 @@ export function Settings({ refresh }: { refresh: number }) {
                     </label>
                   ))}
               </div>
-              {advanced && (
-                <EncoderSettings draft={draft} setDraft={setDraft} />
-              )}
+              {/* 编码器是核心功能，不能藏在「高级设置」后面：折叠时刷新页面会看起来
+                  「已保存的配置丢失」（输入框根本没渲染）。任何模式下都必须显示。 */}
+              <EncoderSettings draft={draft} setDraft={setDraft} />
               <footer>
                 <span>配置版本 {draft.revision}</span>
                 <button

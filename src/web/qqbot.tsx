@@ -49,7 +49,8 @@ export function QQBot({
   const [draft, setDraft] = useState<BotSettings | null>(null);
   const [reason, setReason] = useState("调整 QQBOT 配置");
   const [pending, setPending] = useState<Pending | null>(null);
-  const [budget, setBudget] = useState(600);
+  // 与后端缺省保持一致（config.tokenBudget 默认 1200 字节）。
+  const [budget, setBudget] = useState(1200);
   const [writeExamples, setWriteExamples] = useState(false);
   const profile = useResource<BotProfile>(
     botSubject ? "/qqbot" + query({ subject_id: botSubject }) : null,
