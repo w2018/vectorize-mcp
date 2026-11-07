@@ -210,6 +210,7 @@ export async function buildApp(options: AppOptions) {
       origin: options.origin,
       passwordFile: options.passwordFile,
       updateRoot: options.updateRoot,
+      testEncoder: (input) => service.testEncoder(input),
     });
     app.get("/health", async () => ({ ok: true, version: APP_VERSION }));
     const webRoot = resolve(options.webRoot ?? "dist/web");

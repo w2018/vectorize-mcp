@@ -10,6 +10,8 @@ import {
   type CloudFile,
   type CloudJob,
   type Config,
+  type EncoderPresetsResponse,
+  type EncoderTestResult,
   type BotPreset,
   type Page,
   type Preview,
@@ -1388,6 +1390,209 @@ export function Backups({
   );
 }
 
+const ENCODER_FIELD_KEYS = new Set<keyof Config>([
+  "embeddingBaseUrl",
+  "embeddingModel",
+  "embeddingDimension",
+]);
+
+/**
+ * 向量编码器设置块：预设下拉 + 三项参数说明 + 连通性测试。
+ * 只改 draft（表单草稿），测试连接直接打后端 /config/embedding-test，不写库。
+ */
+function EncoderSettings({
+  draft,
+  setDraft,
+}: {
+  draft: Config;
+  setDraft: (next: Config) => void;
+}) {
+  const presets = useResource<EncoderPresetsResponse>(
+    "/config/embedding-presets",
+    0,
+  );
+  const [selected, setSelected] = useState("");
+  const [result, setResult] = useState<EncoderTestResult | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (selected || !presets.data) return;
+    setSelected(presets.data.active);
+  }, [presets.data, selected]);
+
+  const items = presets.data?.items ?? [];
+  const preset = items.find((item) => item.key === selected);
+  const configured = Boolean(draft.embeddingModel);
+  const complete =
+    Boolean(draft.embeddingBaseUrl) &&
+    Boolean(draft.embeddingModel) &&
+    Number(draft.embeddingDimension) > 0;
+
+  const applyPreset = (key: string) => {
+    setSelected(key);
+    setResult(null);
+    setError("");
+    const target = items.find((item) => item.key === key);
+    if (!target || key === "custom") return;
+    setDraft({
+      ...draft,
+      embeddingBaseUrl: target.baseUrl,
+      embeddingModel: target.model,
+      embeddingDimension: target.dimension,
+    });
+  };
+
+  const test = () => {
+    if (!complete) {
+      setError("请先填全服务地址、模型名和向量维度，再测试连接。");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setResult(null);
+    void api<EncoderTestResult>("/config/embedding-test", "POST", {
+      baseUrl: draft.embeddingBaseUrl,
+      model: draft.embeddingModel,
+      dimension: draft.embeddingDimension,
+    })
+      .then(setResult)
+      .catch((e: unknown) =>
+        setError(e instanceof Error ? e.message : "测试请求失败"),
+      )
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <div className="encoder-settings">
+      <h3>向量编码器（语义检索）</h3>
+      <p className="encoder-intro">
+        {configured
+          ? "已启用语义检索：新写入与检索会调用该服务生成向量，结果标记 scoring_mode=semantic。"
+          : "当前未启用语义检索，检索只做词法匹配。配置并通过测试后，语义召回会明显提升，但记忆正文会发送到下面填写的服务。"}
+      </p>
+      <div className="settings-grid">
+        <label className="setting">
+          <span>选择服务预设</span>
+          <select
+            value={selected}
+            onChange={(e) => applyPreset(e.target.value)}
+          >
+            <option value="">请选择…</option>
+            {items.map((item) => (
+              <option key={item.key} value={item.key}>
+                {item.label}
+              </option>
+            ))}
+          </select>
+          <small>{preset?.summary ?? "选择预设会自动填入地址、模型与维度，仍可手动修改。"}</small>
+          {preset?.needsKey && (
+            <small className="encoder-warn">
+              该服务需要 API Key，且 Key 只能由服务端环境变量 EMBEDDING_API_KEY 提供
+              {presets.data?.key_from_env
+                ? "（当前已检测到该变量）。"
+                : "（当前未检测到该变量，测试连接会返回鉴权失败）。"}
+            </small>
+          )}
+        </label>
+        <label className="setting">
+          <span>服务地址（baseUrl）</span>
+          <input
+            type="text"
+            value={draft.embeddingBaseUrl}
+            placeholder="https://api.openai.com/v1"
+            onChange={(e) => {
+              setResult(null);
+              setDraft({ ...draft, embeddingBaseUrl: e.target.value });
+            }}
+          />
+          <small>
+            填到 <code>/v1</code> 这一层即可，程序会自动追加
+            <code>/embeddings</code>；写成 <code>.../v1/embeddings</code> 会 404。
+          </small>
+        </label>
+        <label className="setting">
+          <span>模型名（model）</span>
+          <input
+            type="text"
+            value={draft.embeddingModel}
+            placeholder="text-embedding-3-small"
+            onChange={(e) => {
+              setResult(null);
+              setDraft({ ...draft, embeddingModel: e.target.value });
+            }}
+          />
+          <small>
+            必须与服务端返回的 model 字段一致，否则按「模型不匹配」拒绝写入向量。
+          </small>
+        </label>
+        <label className="setting">
+          <span>向量维度（dimension）</span>
+          <input
+            type="number"
+            min={1}
+            max={8192}
+            value={String(draft.embeddingDimension ?? 0)}
+            onChange={(e) => {
+              setResult(null);
+              setDraft({ ...draft, embeddingDimension: Number(e.target.value) });
+            }}
+          />
+          <small>
+            必须是模型真实输出维度（预设已按官方默认填好）。填错会导致每条记忆都编码失败，
+            检索退回词法。
+          </small>
+        </label>
+      </div>
+      <div className="encoder-actions">
+        <button type="button" disabled={busy} onClick={test}>
+          {busy ? "测试中…" : "测试连接"}
+        </button>
+        {!complete && (
+          <span className="encoder-warn">
+            三项必须同时填写；全部留空表示不使用语义检索。
+          </span>
+        )}
+      </div>
+      {error && <div className="notice warning">{error}</div>}
+      {result && (
+        <div className={"notice " + (result.ok ? "" : "warning")}>
+          {result.ok ? (
+            <>
+              <strong>连接成功</strong>
+              <p>
+                服务返回 {result.dimension} 维向量，耗时 {result.elapsed_ms} ms
+                {result.dimension === draft.embeddingDimension
+                  ? "，与填写的维度一致。"
+                  : "，与填写的维度不一致，请修改向量维度后再保存。"}
+              </p>
+            </>
+          ) : (
+            <>
+              <strong>连接失败</strong>
+              <p>{result.error ?? "未知错误"}</p>
+            </>
+          )}
+        </div>
+      )}
+      <div className="notice">
+        <strong>启用后会发生什么</strong>
+        <p>
+          写入时对新记忆调用一次编码；检索时对查询编码并做向量相似度排序，
+          与词法结果合并（<code>scoring_mode=semantic</code>）。
+        </p>
+        <p>
+          模型或维度变化会清空已有向量并触发后台重建，重建完成前这些记忆退回词法；
+          统计页的「索引失败」「词法降级率」可用来确认是否真的生效。
+        </p>
+        <p>
+          编码失败不会丢失记忆，只会降级为词法检索并在响应 warnings 中说明原因。
+        </p>
+      </div>
+    </div>
+  );
+}
+
 const fields: {
   key: keyof Config;
   label: string;
@@ -1654,6 +1859,7 @@ export function Settings({ refresh }: { refresh: number }) {
                 {fields
                   .filter(
                     (f) =>
+                      !ENCODER_FIELD_KEYS.has(f.key) &&
                       (advanced || !f.advanced) &&
                       (!search || (f.label + f.help).includes(search)),
                   )
@@ -1701,6 +1907,9 @@ export function Settings({ refresh }: { refresh: number }) {
                     </label>
                   ))}
               </div>
+              {advanced && (
+                <EncoderSettings draft={draft} setDraft={setDraft} />
+              )}
               <footer>
                 <span>配置版本 {draft.revision}</span>
                 <button

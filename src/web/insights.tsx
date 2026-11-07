@@ -645,7 +645,14 @@ export function Stats({
   const [rebuilding, setRebuilding] = useState(false);
   const [rebuildResult, setRebuildResult] = useState<string>("");
   const d = data.data;
+  // 编码器「未配置」与「配置不完整」要区分：后者会让每次编码失败并静默降级，
+  // 用户只看到词法结果却以为语义已开启。
   const embeddingMissing = config.data && !config.data.embeddingModel;
+  const embeddingPartial =
+    config.data &&
+    Boolean(config.data.embeddingModel) &&
+    (!config.data.embeddingBaseUrl ||
+      Number(config.data.embeddingDimension ?? 0) < 1);
   const pct = (value: number | null | undefined) =>
     value == null ? "—" : (value * 100).toFixed(1) + "%";
   const metricGroups = [
@@ -750,9 +757,14 @@ export function Stats({
           <h2>如何理解这些数字</h2>
           {embeddingMissing && (
             <div className="notice warning">
-              当前未配置向量编码器，检索只能走词法匹配；上方「词法降级率」会显示所选时间范围内的实际降级比例。到「设置 → 检索配置」填写
-              embeddingModel / embeddingBaseUrl / embeddingDimension
-              后保存，可启用语义检索、明显提升召回率与有结果率。
+              当前未配置向量编码器，检索只能走词法匹配；上方「词法降级率」会显示所选时间范围内的实际降级比例。到「设置 → 高级设置 → 向量编码器」选择服务预设并点「测试连接」通过后保存，可启用语义检索、明显提升召回率与有结果率。
+            </div>
+          )}
+          {embeddingPartial && (
+            <div className="notice warning">
+              向量编码器配置不完整（服务地址或向量维度缺失/为
+              0），编码会失败并退回词法检索。请到「设置 → 高级设置 →
+              向量编码器」补全三项并测试连接。
             </div>
           )}
           <p>

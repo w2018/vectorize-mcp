@@ -3287,6 +3287,42 @@ export class Store {
       check(typeof config[k] === "boolean");
     this.text(config.embeddingModel, 0, 200);
     this.text(config.embeddingBaseUrl, 0, 2048);
+    // D-25: 编码器三项必须「全空」或「全填」。此前只校验类型与长度，
+    // 于是「只填模型」「维度为 0」也能保存，运行期 encoder() 构造即抛
+    // ERR_INVALID_URL / Invalid embedding model or dimension，把每次检索都变成 500。
+    const encoderFields = [
+      config.embeddingBaseUrl.trim(),
+      config.embeddingModel.trim(),
+    ];
+    const encoderAny = encoderFields.some(Boolean) || config.embeddingDimension > 0;
+    if (encoderAny) {
+      check(
+        encoderFields.every(Boolean) && config.embeddingDimension > 0,
+        "VALIDATION_ERROR",
+        "向量编码器需同时填写服务地址、模型名和向量维度；全部留空表示不使用语义检索。",
+      );
+      let parsed: URL | null = null;
+      try {
+        parsed = new URL(config.embeddingBaseUrl.trim());
+      } catch {
+        parsed = null;
+      }
+      check(
+        parsed !== null &&
+          (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+          !parsed.username &&
+          !parsed.password &&
+          !parsed.search &&
+          !parsed.hash,
+        "VALIDATION_ERROR",
+        "编码器服务地址必须是 http(s) 地址，不能带账号、查询串或锚点。",
+      );
+      check(
+        config.embeddingDimension >= 1 && config.embeddingDimension <= 8192,
+        "VALIDATION_ERROR",
+        "向量维度必须在 1～8192 之间，且与模型真实输出一致。",
+      );
+    }
     return config;
   }
   previewConfig(patch: Partial<Config>) {

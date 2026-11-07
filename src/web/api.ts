@@ -58,6 +58,29 @@ export interface AccountStats {
 export function dataChanged() {
   window.dispatchEvent(new Event("memory-data-changed"));
 }
+export type { EncoderPreset } from "../core/embedding-presets";
+export interface EncoderPresetsResponse {
+  items: {
+    key: string;
+    label: string;
+    baseUrl: string;
+    model: string;
+    dimension: number;
+    needsKey: boolean;
+    summary: string;
+  }[];
+  /** 当前已发布配置命中的预设 key；三项不完全一致时为 custom。 */
+  active: string;
+  /** 服务端是否设置了 EMBEDDING_API_KEY（只回布尔，不回密钥）。 */
+  key_from_env: boolean;
+}
+export interface EncoderTestResult {
+  ok: boolean;
+  model: string;
+  dimension: number;
+  elapsed_ms: number;
+  error?: string;
+}
 export type { AccountKind, BotPreset, BotProfile, BotSettings, MemoryType } from "../core/types";
 import type { AccountKind, MemoryType } from "../core/types";
 export interface Profile {

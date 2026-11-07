@@ -56,8 +56,26 @@ Windows 与 Linux 行为一致：初始化只在本机保存 scrypt 哈希；已
 | --- | --- |
 | `DATA_DIR` | 数据目录，默认 `data`，建议使用固定绝对路径 |
 | `ADMIN_PASSWORD` | 仅用于 `npm run init-admin` |
-| `EMBEDDING_BASE_URL` / `EMBEDDING_MODEL` / `EMBEDDING_DIMENSION` | 可选编码器，三项同时设置或全部省略 |
-| `EMBEDDING_API_KEY` | 可选服务端编码器密钥，不通过后台返回 |
+| `EMBEDDING_BASE_URL` / `EMBEDDING_MODEL` / `EMBEDDING_DIMENSION` | 可选编码器，**三项必须同时设置或全部省略**；只设一部分会被配置校验拒绝 |
+| `EMBEDDING_API_KEY` | 可选服务端编码器密钥，不通过后台返回（Web 界面不接收也不展示） |
+
+### 向量编码器（语义检索）
+
+「设置 → 高级设置 → 向量编码器」提供预设下拉，选中后自动填入三项：
+
+| 预设 | baseUrl | model | 维度 | 是否需要 Key |
+| --- | --- | --- | --- | --- |
+| OpenAI 官方 | `https://api.openai.com/v1` | `text-embedding-3-small` | 1536 | 是 |
+| 阿里云百炼 DashScope | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `text-embedding-v3` | 1024 | 是 |
+| 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | `embedding-3` | 2048 | 是 |
+| 本地 Ollama | `http://127.0.0.1:11434/v1` | `nomic-embed-text` | 768 | 否 |
+| 本地 LM Studio | `http://127.0.0.1:1234/v1` | `text-embedding-nomic-embed-text-v1.5` | 768 | 否 |
+
+- **baseUrl 填到 `/v1` 这一层**，程序自动追加 `/embeddings`；写成 `.../v1/embeddings` 会 404。
+- **维度必须是模型真实输出维度**，填错会让每条记忆编码失败并退回词法检索。
+- **保存前先点「测试连接」**：它用草稿配置真实请求一次，不写库、不切换当前配置，返回实际维度、耗时或具体失败原因（地址非法 / 401 鉴权 / 维度不匹配 / 超时）。
+- 三项全部留空表示不使用语义检索；配置有值但不完整会在保存阶段直接拒绝，不再出现「配置写错导致每次检索 500」。
+- 编码器运行期失败（网络中断、Key 失效）不会丢记忆，只降级为词法检索，并在响应 `warnings` 中给出原因。
 
 监听 IP 与端口放在 `<DATA_DIR>/server-config.json`，首次启动自动生成默认值 `{ "host": "0.0.0.0", "port": 3100 }`。修改文件后重启服务生效；不再读取 HOST / PORT 环境变量。
 

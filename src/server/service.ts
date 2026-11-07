@@ -75,13 +75,37 @@ export class MemoryService implements McpService<Context> {
       normalization: "l2",
     };
   }
+  /** 最近一次编码器构造失败的原因；供检索给出可读降级警告，而不是抛 500。 */
+  private encoderFailure = "";
   private async encoder(): Promise<EmbeddingProvider | null> {
     const config = await this.effectiveEmbeddingConfig();
     if (!config.enabled) return null;
     if (!config.baseUrl && this.fallback) return this.fallback;
     const key = JSON.stringify(config);
     if (this.adapterCache?.key === key) return this.adapterCache.provider;
-    const provider = new OpenAIEmbedding({
+    // D-26: 构造期异常（地址非法、维度为 0、并发参数非法）此前直接冒泡到 MCP 层
+    // 被压成 INTERNAL_ERROR，导致「配置写错 → 每次检索都 500」。这里收敛成
+    // 「本次不可用」，由调用方降级为词法检索并给出原因。
+    let provider: EmbeddingProvider;
+    try {
+      provider = this.buildEncoder(config);
+    } catch (error) {
+      this.encoderFailure =
+        error instanceof Error && error.message ? error.message : "encoder unavailable";
+      this.adapterCache = undefined;
+      return null;
+    }
+    this.encoderFailure = "";
+    this.adapterCache = { key, provider };
+    return provider;
+  }
+  private buildEncoder(config: {
+    baseUrl: string;
+    model: string;
+    dimension: number;
+    version: string;
+  }): EmbeddingProvider {
+    return new OpenAIEmbedding({
       baseUrl: config.baseUrl,
       model: config.model,
       dimension: config.dimension,
@@ -94,8 +118,6 @@ export class MemoryService implements McpService<Context> {
       concurrency: Number(this.env.EMBEDDING_CONCURRENCY ?? 4),
       maxQueue: Number(this.env.EMBEDDING_MAX_QUEUE ?? 64),
     });
-    this.adapterCache = { key, provider };
-    return provider;
   }
   private identity(embedding: EmbeddingProvider): string {
     const d = embedding.descriptor;
@@ -309,7 +331,14 @@ export class MemoryService implements McpService<Context> {
         warning =
           "EMBEDDING_UNAVAILABLE: semantic encoding failed; lexical fallback only.";
       }
-    } else
+    } else if (this.encoderFailure)
+      // 配置有值但编码器无法构造（地址非法/维度为 0）：必须说明真实原因，
+      // 否则用户只会看到「未配置」，去设置页也看不出哪里填错了。
+      warning =
+        "EMBEDDING_UNAVAILABLE: encoder configuration is invalid (" +
+        this.encoderFailure +
+        "); lexical fallback only.";
+    else
       warning =
         "EMBEDDING_NOT_CONFIGURED: semantic search is disabled; lexical fallback only.";
     for (let attempt = 0; ; attempt++) {
@@ -407,5 +436,78 @@ export class MemoryService implements McpService<Context> {
       modelIdentity,
       vector,
     );
+  }
+  /**
+   * 用给定配置（通常是设置页尚未发布的草稿）真实调用一次编码服务。
+   * 不写数据库、不改动当前配置，因此可以在预览之前验证三项是否互相匹配；
+   * 失败时返回可读原因，而不是让用户去猜「为什么检索还是词法」。
+   */
+  async testEncoder(input: {
+    baseUrl: string;
+    model: string;
+    dimension: number;
+  }): Promise<{
+    ok: boolean;
+    model: string;
+    dimension: number;
+    elapsed_ms: number;
+    error?: string;
+  }> {
+    const started = Date.now();
+    const base = { model: input.model, dimension: input.dimension };
+    let provider: EmbeddingProvider;
+    try {
+      provider = new OpenAIEmbedding({
+        baseUrl: input.baseUrl,
+        model: input.model,
+        dimension: input.dimension,
+        apiKey: this.env.EMBEDDING_API_KEY,
+        timeoutMs: Number(this.env.EMBEDDING_TIMEOUT_MS ?? 15000),
+        concurrency: 1,
+        maxQueue: 0,
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        ...base,
+        dimension: 0,
+        elapsed_ms: Date.now() - started,
+        error: this.readableEncoderError(error),
+      };
+    }
+    try {
+      const vector = await provider.embed("向量编码器连通性测试");
+      return {
+        ok: true,
+        model: provider.descriptor.model,
+        dimension: vector.length,
+        elapsed_ms: Date.now() - started,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        ...base,
+        elapsed_ms: Date.now() - started,
+        error: this.readableEncoderError(error),
+      };
+    }
+  }
+  private readableEncoderError(error: unknown): string {
+    const message =
+      error instanceof Error && error.message ? error.message : "unknown error";
+    if (/Invalid URL/i.test(message))
+      return "服务地址不是合法的 http(s) 地址，或缺少 /v1 前缀。";
+    if (/dimension or values invalid/i.test(message))
+      return "返回向量长度与填写的向量维度不一致，请按模型真实输出维度填写。";
+    if (/model mismatch/i.test(message))
+      return "服务返回的 model 与填写的模型名不一致，请核对模型名。";
+    if (/HTTP 401|HTTP 403/i.test(message))
+      return "鉴权失败：请确认服务端环境变量 EMBEDDING_API_KEY 已设置且有效。";
+    if (/HTTP 404/i.test(message))
+      return "接口不存在：确认地址是 OpenAI 兼容基址，且不要包含 /embeddings 后缀。";
+    if (/HTTP/i.test(message)) return message + "（服务端拒绝请求）。";
+    if (/timed out|timeout/i.test(message))
+      return "连接超时：确认服务已启动、地址与端口可达。";
+    return message;
   }
 }

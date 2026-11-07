@@ -20,6 +20,10 @@ import { tmpdir } from "node:os";
 import { WebdavCloud } from "./webdav.js";
 import { APP_VERSION } from "./version.js";
 import { hashPassword } from "./password.js";
+import {
+  ENCODER_PRESETS,
+  matchEncoderPreset,
+} from "../core/embedding-presets.js";
 import type { DatabasePool } from "./database.js";
 import { BOT_PRESETS } from "../core/catalog.js";
 import {
@@ -147,6 +151,18 @@ export async function registerAdmin(
     passwordFile?: string;
     /** 安装根目录（源码与 dist 所在），在线更新会在此目录内覆盖程序文件。 */
     updateRoot?: string;
+    /** 编码器连通性测试复用服务的编码适配器；缺省时该路由返回 FEATURE_DISABLED。 */
+    testEncoder?: (input: {
+      baseUrl: string;
+      model: string;
+      dimension: number;
+    }) => Promise<{
+      ok: boolean;
+      model: string;
+      dimension: number;
+      elapsed_ms: number;
+      error?: string;
+    }>;
   },
 ): Promise<void> {
   const installRoot = resolve(options.updateRoot ?? process.cwd());
@@ -750,12 +766,37 @@ export async function registerAdmin(
     return paged(items, q);
   });
   route("GET", "/config", async () => read("getConfig"));
+  // 编码器预设目录：设置页下拉与「每个参数的用法」文案的唯一来源。
+  route("GET", "/config/embedding-presets", async () => ({
+    items: ENCODER_PRESETS,
+    active:
+      matchEncoderPreset(
+        await read<{
+          embeddingBaseUrl?: string;
+          embeddingModel?: string;
+          embeddingDimension?: number;
+        }>("getConfig"),
+      )?.key ?? "custom",
+    key_from_env: Boolean(process.env.EMBEDDING_API_KEY),
+  }));
   route("POST", "/config/preview", async (req) => {
     const b = body(req),
       config = await read<{ revision: number }>("getConfig");
     if (config.revision !== revision(b.expected_revision))
       throw new DomainError("REVISION_CONFLICT");
     return write("previewConfig", object(b.patch));
+  });
+  // 设置页「测试连接」：只验证，不落库、不切换当前配置。
+  route("POST", "/config/embedding-test", async (req) => {
+    if (!options.testEncoder) throw new DomainError("FEATURE_DISABLED");
+    const b = body(req);
+    const baseUrl = text(b.baseUrl).trim();
+    const model = text(b.model).trim();
+    const dimension = Number(b.dimension);
+    if (!baseUrl || !model) throw new DomainError("VALIDATION_ERROR");
+    if (!Number.isSafeInteger(dimension) || dimension < 1 || dimension > 8192)
+      throw new DomainError("VALIDATION_ERROR");
+    return options.testEncoder({ baseUrl, model, dimension });
   });
   route("PATCH", "/config", async (req) => {
     const b = body(req);
