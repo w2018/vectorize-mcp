@@ -19,6 +19,7 @@ import { toolSchemas, type ToolName } from "../mcp/schemas.js";
 import type { McpService } from "../mcp/http.js";
 import { EmbeddingSecret } from "./embedding-secret.js";
 import { ChatModel } from "./llm.js";
+import { assertModelBaseUrl, sameEndpointHost } from "./model-url.js";
 
 export interface EmbeddingProvider {
   readonly descriptor: EmbeddingDescriptor;
@@ -57,6 +58,22 @@ export class MemoryService implements McpService<Context> {
       if (apiKey) return apiKey;
     }
     return (this.env.EMBEDDING_API_KEY ?? "").trim();
+  }
+  /** Resolve the key for a user-supplied model endpoint. A stored server key is
+   * only ever sent to the configured gateway host, never to an arbitrary URL. */
+  private async modelApiKey(baseUrl: string, explicit?: string): Promise<string | undefined> {
+    const direct = explicit?.trim();
+    if (direct) return direct;
+    let config: Config | undefined;
+    try {
+      config = await this.database.read<Config>("embedding-config", "getConfig");
+    } catch {
+      config = undefined;
+    }
+    const trusted = [config?.llmBaseUrl, config?.embeddingBaseUrl, this.env.EMBEDDING_BASE_URL]
+      .filter((value): value is string => Boolean(value && value.trim()))
+      .some((value) => sameEndpointHost(value, baseUrl));
+    return trusted ? (this.apiKey() || undefined) : undefined;
   }
   keyStatus() {
     if (this.secret) {
@@ -618,7 +635,12 @@ export class MemoryService implements McpService<Context> {
     return new ChatModel({
       baseUrl,
       model,
-      apiKey: apiKey?.trim() || this.apiKey() || undefined,
+      // undefined means "use the configured server key"; an explicit empty string
+      // means the caller deliberately supplied no key (user-entered endpoint).
+      apiKey:
+        apiKey !== undefined
+          ? apiKey.trim() || undefined
+          : this.apiKey() || undefined,
       timeoutMs: timeoutMs ?? Number(this.env.EMBEDDING_TIMEOUT_MS ?? 60000),
       // 模型不固定：默认一律低推理，优先保证快速返回；具体模型不支持时由其忽略该参数。
       reasoningEffort,
@@ -632,6 +654,8 @@ export class MemoryService implements McpService<Context> {
   }): Promise<{ ok: boolean; model: string; elapsed_ms: number; error?: string }> {
     const started = Date.now();
     try {
+      await assertModelBaseUrl(input.baseUrl);
+      const apiKey = await this.modelApiKey(input.baseUrl, input.apiKey);
       const prompt =
         "把两条记忆合并为一条，只输出 JSON：{\"title\":\"\",\"content\":\"\",\"type\":\"lesson\",\"keywords\":[\"\"],\"importance\":1到99,\"reason\":\"\"}。\n" +
         "1. 配置热更新踩坑：忽略超时，后来增加幂等键（记录3870）。\n" +
@@ -642,7 +666,7 @@ export class MemoryService implements McpService<Context> {
       for (const maxTokens of [1024, 2048, 4096]) {
         const remaining = deadline - Date.now();
         if (remaining <= 1000) break;
-        const model = this.chatModel(input.baseUrl, input.model, input.apiKey, remaining, "low");
+        const model = this.chatModel(input.baseUrl, input.model, apiKey, remaining, "low");
         try {
           reply = await model.chat(
             [
@@ -692,24 +716,21 @@ export class MemoryService implements McpService<Context> {
   }): Promise<{ ok: boolean; models: string[]; error?: string }> {
     let endpoint: URL;
     try {
+      await assertModelBaseUrl(input.baseUrl);
       const url = new URL(input.baseUrl);
-      if (!["http:", "https:"].includes(url.protocol)) throw new Error("Invalid URL");
       url.pathname = url.pathname.replace(/\/$/, "") + "/models";
       endpoint = url;
-    } catch {
-      return { ok: false, models: [], error: "服务地址不是合法的 http(s) 地址。" };
+    } catch (error) {
+      return { ok: false, models: [], error: this.readableModelError(error) };
     }
     try {
+      const apiKey = await this.modelApiKey(input.baseUrl, input.apiKey);
       const response = await (this.fetchImpl ?? fetch)(endpoint, {
         method: "GET",
         redirect: "error",
         signal: AbortSignal.timeout(Number(this.env.EMBEDDING_TIMEOUT_MS ?? 15000)),
         headers: {
-          ...(input.apiKey?.trim()
-            ? { Authorization: "Bearer " + input.apiKey.trim() }
-            : this.apiKey()
-              ? { Authorization: "Bearer " + this.apiKey() }
-              : {}),
+          ...(apiKey ? { Authorization: "Bearer " + apiKey } : {}),
         },
       });
       if (!response.ok)

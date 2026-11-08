@@ -193,6 +193,52 @@ export async function buildApp(options: AppOptions) {
       : null;
     const service = new MemoryService(db, null, env, secret);
   void service.interruptStaleJobs().catch(() => {});
+    const baseOrigin = (() => {
+      try {
+        return new URL(options.origin).origin;
+      } catch {
+        return options.origin;
+      }
+    })();
+    const allowedOrigins = new Set([baseOrigin]);
+    for (const extra of [process.env.PUBLIC_ORIGIN, process.env.ALLOWED_ORIGINS]
+      .filter((value): value is string => Boolean(value && value.trim()))
+      .flatMap((value) => value.split(",")))
+      try {
+        allowedOrigins.add(new URL(extra.trim()).origin);
+      } catch {
+        /* ignore malformed optional entries */
+      }
+    const basePort = (() => {
+      try {
+        return new URL(baseOrigin).port;
+      } catch {
+        return "";
+      }
+    })();
+    const originAllowedForMcp = (
+      header: string | undefined,
+      _fetchMode: string | string[] | undefined,
+    ): boolean => {
+      // Browser fetches always send Sec-Fetch-Mode; an Origin-less browser request
+      // is suspicious, while non-browser MCP clients legitimately omit Origin.
+      if (header === undefined) return true;
+      let parsed: URL;
+      try {
+        parsed = new URL(header);
+      } catch {
+        return false;
+      }
+      if (allowedOrigins.has(parsed.origin)) return true;
+      const host = parsed.hostname.toLowerCase();
+      const address = app.server.address();
+      const actualPort =
+        address && typeof address !== "string" ? String(address.port) : "";
+      return (
+        parsed.port === (actualPort || basePort) &&
+        (host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]")
+      );
+    };
     const mcp = createMcpHandler(service);
     app.route({
       method: ["GET", "POST", "DELETE"],
@@ -200,30 +246,21 @@ export async function buildApp(options: AppOptions) {
       bodyLimit: 1024 * 1024,
       handler: async (request, reply) => {
         const origin = request.headers.origin;
-        if (origin && origin !== options.origin) {
-          // 允许本机回环地址访问（浏览器用 localhost/127.0.0.1 打开本服务时，
-          // Origin 与外网 PUBLIC_ORIGIN 不同但仍是同源请求）。其余跨站一律拒绝。
-          let allowed = false;
-          try {
-            const parsed = new URL(origin);
-            const host = request.headers.host;
-            // 同 Host 即同源：本机、局域网 IP、内网域名都放行；不再硬编码回环地址。
-            allowed = host
-              ? parsed.host.toLowerCase() === host.toLowerCase()
-              : parsed.origin === options.origin;
-          } catch {
-            allowed = false;
-          }
-          if (!allowed)
-            return reply.code(403).send({ error: "Origin not allowed" });
-        }
+        // Never trust Host here: a forged Origin==Host pair bypassed the old check.
+        // Allowed origins come from startup origin plus explicit PUBLIC_ORIGIN/
+        // ALLOWED_ORIGINS entries; loopback with the service port stays usable.
+        if (!originAllowedForMcp(origin, request.headers["sec-fetch-mode"]))
+          return reply.code(403).send({ error: "Origin not allowed" });
         reply.hijack();
         await mcp(request.raw, reply.raw, request.body);
       },
     });
     await registerAdmin(app, db, {
       passwordHash: options.passwordHash,
-      secureCookie: options.origin.startsWith("https:"),
+      secureCookie:
+        options.origin.startsWith("https:") ||
+        (process.env.PUBLIC_ORIGIN ?? "").startsWith("https:") ||
+        process.env.COOKIE_SECURE === "1",
       backupDir: options.backupDir,
       origin: options.origin,
       passwordFile: options.passwordFile,

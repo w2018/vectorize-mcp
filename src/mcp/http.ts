@@ -62,8 +62,14 @@ function authorizationFailure(res: ServerResponse, error: unknown): void {
     error && typeof error === "object" && "code" in error
       ? error.code
       : undefined;
-  if (code === "UNAUTHENTICATED" || code === "FORBIDDEN") {
-    unauthorized(res, code === "FORBIDDEN" ? 403 : 401);
+  const authStatus: Record<string, number> = {
+    UNAUTHENTICATED: 401,
+    SESSION_STALE: 401,
+    TOKEN_REVOKED: 401,
+    FORBIDDEN: 403,
+  };
+  if (typeof code === "string" && authStatus[code]) {
+    unauthorized(res, authStatus[code], code);
     return;
   }
   if (res.headersSent) {
@@ -84,7 +90,11 @@ function authorizationFailure(res: ServerResponse, error: unknown): void {
     }),
   );
 }
-function unauthorized(res: ServerResponse, status = 401): void {
+function unauthorized(
+  res: ServerResponse,
+  status = 401,
+  code = "UNAUTHENTICATED",
+): void {
   if (res.headersSent) {
     res.destroy();
     return;
@@ -97,7 +107,16 @@ function unauthorized(res: ServerResponse, status = 401): void {
     JSON.stringify({
       jsonrpc: "2.0",
       id: null,
-      error: { code: -32001, message: "Authentication required" },
+      error: {
+        code: -32001,
+        message:
+          code === "FORBIDDEN"
+            ? "Permission denied"
+            : code === "SESSION_STALE" || code === "TOKEN_REVOKED"
+              ? "Credential is no longer valid"
+              : "Authentication required",
+        data: { code },
+      },
     }),
   );
 }
@@ -203,11 +222,10 @@ export function createMcpHandler<C>(service: McpService<C>) {
               result && typeof result === "object" && "data" in result
                 ? (result.data as { status?: unknown } | undefined)
                 : undefined;
-            const needsReview =
-              name === "memory_add" && data?.status === "needs_review";
+            // NEEDS_REVIEW is represented once, by ok:false + error.code; do not
+            // infer a second success/failure channel from data.status here.
             const silent =
               !isError &&
-              !needsReview &&
               ((name === "memory_add" && data?.status === "created") ||
                 name === "memory_update" ||
                 (name === "memory_archive" && args.action !== "preview"));

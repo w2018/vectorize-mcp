@@ -189,11 +189,16 @@ export function Accounts({
     );
   }
   async function reveal(token: Token) {
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm("查看凭据明文会记录审计日志，确定继续？")
+    )
+      return;
     await action.run(async () => {
       const result = await api<TokenResponse>(
         "/tokens/" + token.id + "/reveal",
         "POST",
-        writeBody({}),
+        writeBody({ confirm: true }),
       );
       rememberIssued(
         {

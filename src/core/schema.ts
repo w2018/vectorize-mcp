@@ -41,6 +41,9 @@ END;
 CREATE TABLE IF NOT EXISTS vectors(memory_id TEXT PRIMARY KEY REFERENCES memories(id),revision INTEGER NOT NULL,model TEXT NOT NULL,vector BLOB NOT NULL);
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(id UNINDEXED,subject_id UNINDEXED,terms);
 CREATE TABLE IF NOT EXISTS dedup(actor TEXT NOT NULL,tool TEXT NOT NULL,request_id TEXT NOT NULL,args_hash TEXT NOT NULL,response TEXT NOT NULL,snapshots TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(actor,tool,request_id));
+-- v0.6.8: persistent search metrics (dedup is culled after 24h and cannot back 30-day stats).
+CREATE TABLE IF NOT EXISTS search_events(id TEXT PRIMARY KEY,subject_id TEXT NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,created_at INTEGER NOT NULL,mode TEXT NOT NULL,item_count INTEGER NOT NULL,estimated_tokens INTEGER NOT NULL,extraction_tokens INTEGER NOT NULL,labeled INTEGER NOT NULL DEFAULT 0,hit_at_1 INTEGER NOT NULL DEFAULT 0,hit_at_3 INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS search_event_scope ON search_events(subject_id,created_at);
 CREATE TABLE IF NOT EXISTS previews(digest TEXT PRIMARY KEY,actor TEXT NOT NULL,action TEXT NOT NULL,payload TEXT NOT NULL,config_revision INTEGER NOT NULL,expires_at INTEGER NOT NULL,consumed INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS audit(id TEXT PRIMARY KEY,actor TEXT NOT NULL,action TEXT NOT NULL,target TEXT NOT NULL,created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY,event TEXT NOT NULL,payload TEXT NOT NULL,created_at INTEGER NOT NULL,delivered INTEGER NOT NULL DEFAULT 0);

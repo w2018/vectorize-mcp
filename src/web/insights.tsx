@@ -686,7 +686,12 @@ export function Stats({
       <Heading
         eyebrow="AT A GLANCE"
         title="记忆统计"
-        description="观察记忆的使用和检索健康状况。没有数据的指标显示为“—”。"
+        description={
+          "观察记忆的使用和检索健康状况。没有数据的指标显示为“—”。" +
+          (d?.stats_basis === "dedup_24h"
+            ? "（当前搜索统计仅有最近 24 小时缓存数据）"
+            : "")
+        }
       >
         <select
           aria-label="统计时间范围"

@@ -3874,6 +3874,26 @@ export class Store {
                   : null,
             }
           : undefined;
+      const extractionTokens = items.reduce(
+        (bytes, item) => bytes + Buffer.byteLength(JSON.stringify(item)),
+        0,
+      );
+      this.db
+        .prepare(
+          "INSERT INTO search_events VALUES (?,?,?,?,?,?,?,?,?,?)",
+        )
+        .run(
+          randomUUID(),
+          ctx.subjectId,
+          Date.now(),
+          prepared.mode,
+          items.length,
+          prepared.estimatedTokens,
+          extractionTokens,
+          evaluation ? 1 : 0,
+          evaluation?.hit_at_1 ? 1 : 0,
+          evaluation?.hit_at_3 ? 1 : 0,
+        );
       return {
         data: measured({
           items,
@@ -4022,28 +4042,68 @@ export class Store {
     // 用精确后缀比较替掉前导通配 LIKE（结果完全一致，且不依赖 LIKE 的
     // 大小写/通配符语义）。LIMIT 取 dedup 行数上限，不改变结果。
     const suffix = ":" + subjectId;
-    const observations = this.rows(
-      "SELECT response FROM dedup WHERE tool='memory_search' AND created_at>=? AND substr(actor,-length(?))=? LIMIT ?",
-      Date.now() - days * 86400000,
-      suffix,
-      suffix,
-      DEDUP_MAX_ROWS,
-    ).map((r) => JSON.parse(String(r.response)) as Envelope<SearchData>);
-    const labeled = observations.filter((r) => r.data.evaluation?.labeled);
+    const cutoff = Date.now() - days * 86400000;
+    // v0.6.8: search_events survives the 24h dedup cleanup, so the selected
+    // 30/90-day range is backed by real events. Fall back to dedup only before
+    // the first event has been recorded, and label that shorter coverage.
+    const eventRows = this.rows(
+      "SELECT * FROM search_events WHERE subject_id=? AND created_at>=? ORDER BY created_at",
+      subjectId,
+      cutoff,
+    );
+    const legacy = eventRows.length
+      ? []
+      : this.rows(
+          "SELECT response FROM dedup WHERE tool='memory_search' AND created_at>=? AND substr(actor,-length(?))=? LIMIT ?",
+          cutoff,
+          suffix,
+          suffix,
+          DEDUP_MAX_ROWS,
+        ).map((r) => JSON.parse(String(r.response)) as Envelope<SearchData>);
+    const observations = eventRows.length
+      ? eventRows.map((r) => ({
+          items: Number(r.item_count),
+          estimated_tokens: Number(r.estimated_tokens),
+          extraction_tokens: Number(r.extraction_tokens),
+          mode: String(r.mode),
+          labeled: Boolean(r.labeled),
+          hit_at_1: Boolean(r.hit_at_1),
+          hit_at_3: Boolean(r.hit_at_3),
+        }))
+      : legacy.map((r) => ({
+          items: r.data.items.length,
+          estimated_tokens: r.data.estimated_tokens,
+          extraction_tokens: r.data.items.reduce(
+            (bytes, item) => bytes + Buffer.byteLength(JSON.stringify(item)),
+            0,
+          ),
+          mode: r.data.mode,
+          labeled: Boolean(r.data.evaluation?.labeled),
+          hit_at_1: Boolean(r.data.evaluation?.hit_at_1),
+          hit_at_3: Boolean(r.data.evaluation?.hit_at_3),
+        }));
+    const labeled = observations.filter((r) => r.labeled);
     const items = this.all(subjectId);
+    const statsBasis = eventRows.length
+      ? "search_events"
+      : legacy.length
+        ? "dedup_24h"
+        : "search_events";
     return {
       days,
+      stats_basis: statsBasis,
+      stats_coverage_hours: statsBasis === "dedup_24h" ? 24 : days * 24,
       search_requests: observations.length,
       average_returned_tokens: observations.length
-        ? observations.reduce((sum, r) => sum + r.data.estimated_tokens, 0) /
+        ? observations.reduce((sum, r) => sum + r.estimated_tokens, 0) /
           observations.length
         : null,
       empty_result_rate: observations.length
-        ? observations.filter((r) => r.data.items.length === 0).length /
+        ? observations.filter((r) => r.items === 0).length /
           observations.length
         : null,
       degraded_rate: observations.length
-        ? observations.filter((r) => r.data.mode === "lexical").length /
+        ? observations.filter((r) => r.mode === "lexical").length /
           observations.length
         : null,
       active: items.filter((m) => m.status === "active").length,
@@ -4056,30 +4116,24 @@ export class Store {
         0,
       ),
       extraction_total_tokens: observations.reduce(
-        (sum, r) =>
-          sum +
-          r.data.items.reduce(
-            (bytes, item) => bytes + Buffer.byteLength(JSON.stringify(item)),
-            0,
-          ),
+        (sum, r) => sum + r.extraction_tokens,
         0,
       ),
-      hit_effective_rate: observations.length
-        ? observations.filter((r) => r.data.items.length > 0).length /
-          observations.length
+      // Effective hit only exists for labeled evaluations; an unlabeled search
+      // simply having rows is reported by result_rate, never as effectiveness.
+      hit_effective_rate: labeled.length
+        ? labeled.filter((r) => r.hit_at_1).length / labeled.length
         : null,
       result_rate: observations.length
-        ? observations.filter((r) => r.data.items.length > 0).length /
+        ? observations.filter((r) => r.items > 0).length /
           observations.length
         : null,
       labeled_search_requests: labeled.length,
       labeled_hit_at_1: labeled.length
-        ? labeled.filter((r) => r.data.evaluation?.hit_at_1).length /
-          labeled.length
+        ? labeled.filter((r) => r.hit_at_1).length / labeled.length
         : null,
       labeled_hit_at_3: labeled.length
-        ? labeled.filter((r) => r.data.evaluation?.hit_at_3).length /
-          labeled.length
+        ? labeled.filter((r) => r.hit_at_3).length / labeled.length
         : null,
       retrieval_count: String(
         items
@@ -4746,12 +4800,6 @@ export class Store {
         this.row("SELECT coalesce(max(auth_epoch),0) epoch FROM subjects")!
           .epoch,
       );
-    this.tx(() =>
-      this.consume(previewToken, "admin", "restore_backup", {
-        path: absolute,
-        sha256: digest,
-      }),
-    );
     const replacement = this.path + ".restore-" + randomUUID();
     copyFileSync(absolute, replacement);
     check(hashFile(replacement) === digest, "IMPORT_INVALID");
@@ -4802,6 +4850,23 @@ export class Store {
       throw error;
     } finally {
       candidate.close();
+    }
+    // Validate the replacement completely before burning the preview ticket, so a
+    // tampered/corrupt backup can be retried with the same ticket.
+    try {
+      this.tx(() =>
+        this.consume(previewToken, "admin", "restore_backup", {
+          path: absolute,
+          sha256: digest,
+        }),
+      );
+    } catch (error) {
+      try {
+        if (existsSync(replacement)) rmSync(replacement);
+      } catch {
+        /* best-effort cleanup */
+      }
+      throw error;
     }
     this.db.pragma("wal_checkpoint(TRUNCATE)");
     this.db.close();

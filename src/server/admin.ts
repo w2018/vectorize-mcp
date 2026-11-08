@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { WebdavCloud } from "./webdav.js";
 import { APP_VERSION } from "./version.js";
 import { hashPassword } from "./password.js";
+import { assertModelBaseUrl } from "./model-url.js";
 import type { DatabasePool } from "./database.js";
 import { BOT_PRESETS } from "../core/catalog.js";
 import {
@@ -45,6 +46,10 @@ interface StagedImport {
 }
 const COOKIE = "vmcp_admin";
 const SESSION_MS = 8 * 60 * 60 * 1000;
+/** Hard caps keep an unauthenticated flood from exhausting process memory or
+ * blocking administrator login. Pre-auth sessions are evicted first. */
+const MAX_SESSIONS = 10000;
+const MAX_PREAUTH_SESSIONS = 1000;
 const IMPORT_MAX = 100 * 1024 * 1024;
 function object(value: unknown): RecordData {
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -254,9 +259,27 @@ export async function registerAdmin(
   // 只信服务端启动配置 options.origin 与实际 socket 协议。
   const secureCookieFor = (req: FastifyRequest) =>
     options.secureCookie || req.protocol === "https";
-  const issue = (reply: FastifyReply, authenticated: boolean, req: FastifyRequest) => {
+  const evictSessions = (authenticated: boolean) => {
     cleanup();
-    if (sessions.size >= 10000) throw new DomainError("SERVER_BUSY");
+    if (authenticated) {
+      // A legitimate login must never be starved by pre-auth throwaway sessions.
+      for (const [id, session] of sessions)
+        if (!session.authenticated) sessions.delete(id);
+    } else {
+      let count = 0;
+      for (const session of sessions.values()) if (!session.authenticated) count++;
+      for (const [id, session] of sessions) {
+        if (count < MAX_PREAUTH_SESSIONS) break;
+        if (!session.authenticated) {
+          sessions.delete(id);
+          count--;
+        }
+      }
+    }
+    if (sessions.size >= MAX_SESSIONS) throw new DomainError("SERVER_BUSY");
+  };
+  const issue = (reply: FastifyReply, authenticated: boolean, req: FastifyRequest) => {
+    evictSessions(authenticated);
     const s = {
       id: randomBytes(32).toString("base64url"),
       csrf: randomBytes(32).toString("base64url"),
@@ -518,6 +541,8 @@ export async function registerAdmin(
     paged(await read<unknown[]>("listTokens"), query(req)),
   );
   route("POST", "/tokens/:id/reveal", async (req) => {
+    if (body(req).confirm !== true)
+      throw new DomainError("CONFIRM_REQUIRED", "查看凭据明文需要二次确认。");
     const revealed = await write<RecordData | null>("revealToken", param(req));
     if (!revealed)
       throw new DomainError(
@@ -1011,6 +1036,7 @@ export async function registerAdmin(
     const b = body(req);
     const baseUrl = text(b.baseUrl).trim();
     if (!baseUrl) throw new DomainError("VALIDATION_ERROR");
+    await assertModelBaseUrl(baseUrl);
     const apiKey =
       typeof b.api_key === "string" && b.api_key.trim()
         ? b.api_key.trim()
@@ -1031,6 +1057,7 @@ export async function registerAdmin(
     const baseUrl = text(b.baseUrl).trim();
     const model = text(b.model).trim();
     if (!baseUrl || !model) throw new DomainError("VALIDATION_ERROR");
+    await assertModelBaseUrl(baseUrl);
     const apiKey =
       typeof b.api_key === "string" && b.api_key.trim()
         ? b.api_key.trim()

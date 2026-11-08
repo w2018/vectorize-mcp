@@ -48,7 +48,9 @@ if (process.argv.includes("init-admin")) {
   const host = serverConfig.host;
   const port = serverConfig.port;
   const displayHost = host === "0.0.0.0" ? "127.0.0.1" : host;
-  const origin = "http://" + displayHost + ":" + port;
+  const origin =
+    process.env.PUBLIC_ORIGIN?.trim().replace(/\/$/, "") ||
+    "http://" + displayHost + ":" + port;
   const { app } = await buildApp({
     databasePath: join(dataDir, "memory.sqlite"),
     passwordHash: stored.hash,
