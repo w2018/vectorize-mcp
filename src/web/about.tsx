@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
+  health,
   writeBody,
   type UpdateCheck,
   type UpdateJob,
@@ -41,6 +42,7 @@ type Pending = {
 
 export function About() {
   const [check, setCheck] = useState<UpdateCheck | null>(null);
+  const [appVersion, setAppVersion] = useState("");
   const [checkError, setCheckError] = useState("");
   const [checking, setChecking] = useState(false);
   const [job, setJob] = useState<UpdateJob | null>(null);
@@ -68,6 +70,11 @@ export function About() {
   }, []);
 
   useEffect(() => {
+    // Version comes from the public /health endpoint: the update-check route
+    // needs an admin session, so relying on it alone showed a stale fallback.
+    void health()
+      .then((info) => setAppVersion(String(info.version || "")))
+      .catch(() => setAppVersion(""));
     void runCheck(true);
     return () => {
       if (timer.current) window.clearTimeout(timer.current);
@@ -164,7 +171,7 @@ export function About() {
           <dt>作者</dt>
           <dd>w2018</dd>
           <dt>版本</dt>
-          <dd>{check?.current ?? "0.3.8"}</dd>
+          <dd>{appVersion || check?.current || "—"}</dd>
           <dt>开源协议</dt>
           <dd>MIT</dd>
           <dt>开源地址</dt>
@@ -197,10 +204,15 @@ export function About() {
           </div>
         )}
         {checkError && (
-          <div className="notice warning">检测失败：{checkError}</div>
+          <div className="notice warning">
+            检测失败：{checkError}
+            {/密码|登录|401/i.test(checkError)
+              ? "（登录管理端后可检测更新）"
+              : ""}
+          </div>
         )}
         <div className="notice">
-          当前版本 <strong>{check?.current ?? "—"}</strong>
+          当前版本 <strong>{check?.current || appVersion || "—"}</strong>
           {latest ? (
             <>
               ，最新版本 <strong>{latest.version}</strong>

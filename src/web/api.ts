@@ -55,6 +55,21 @@ export interface AccountStats {
   merged: number;
   total: number;
 }
+/** Public, unauthenticated service identity: used by the About page so the
+ * version never depends on an admin session or a hardcoded fallback. */
+export interface HealthInfo {
+  ok: boolean;
+  version: string;
+}
+export async function health(): Promise<HealthInfo> {
+  const response = await fetch("/health", {
+    credentials: "same-origin",
+    cache: "no-store",
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) throw new Error("HTTP " + response.status);
+  return (await response.json()) as HealthInfo;
+}
 export function dataChanged() {
   window.dispatchEvent(new Event("memory-data-changed"));
 }
