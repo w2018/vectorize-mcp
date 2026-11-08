@@ -160,6 +160,12 @@ export class Store {
   >();
   /** P2-11: cap the in-memory feature cache so a long-lived process stays bounded. */
   private static readonly FEATURE_CACHE_LIMIT = 5000;
+  /** v0.7.3: write-path inverted index (subject -> term -> memory ids). */
+  private termIndex = new Map<string, Map<string, Set<string>>>();
+  private termIndexCount = new Map<string, number>();
+  /** v0.7.3: all() snapshot cache, guarded by a cheap table signature. */
+  private allCache = new Map<string, { sig: string; rows: Memory[] }>();
+  private static readonly TERM_CANDIDATE_LIMIT = 120;
   constructor(
     public readonly path: string,
     options: {
@@ -1824,8 +1830,27 @@ export class Store {
     m.weight = weight(m, this.getConfig());
     return m;
   }
+  /** v0.7.3: content writes go through save(), which drops the cache. The only
+   *  write bypassing save() is commitSearch's counter-only UPDATE; it does not
+   *  enter this signature and commitSearch patches the cached row in place.
+   *  Keeping retrieval_count OUT of the signature is what lets the cache survive
+   *  a search: otherwise every read invalidates it. */
+  private allSignature(subjectId: string): string {
+    const r = this.row(
+      "SELECT COUNT(*) c, COALESCE(MAX(revision),0) r, COALESCE(SUM(revision),0) v FROM memories WHERE subject_id=?",
+      subjectId,
+    );
+    return String(r?.c ?? 0) + ":" + String(r?.r ?? 0) + ":" + String(r?.v ?? 0);
+  }
   private all(subjectId: string): Memory[] {
-    return this.rows(
+    const sig = this.allSignature(subjectId);
+    const hit = this.allCache.get(subjectId);
+    if (hit && hit.sig === sig) {
+      const config = this.getConfig();
+      for (const m of hit.rows) m.weight = weight(m, config);
+      return hit.rows.map((m) => ({ ...m }));
+    }
+    const rows = this.rows(
       "SELECT data,retrieval_count,last_retrieved_at FROM memories WHERE subject_id=?",
       subjectId,
     ).map((r) => {
@@ -1838,6 +1863,8 @@ export class Store {
       m.weight = weight(m, this.getConfig());
       return m;
     });
+    this.allCache.set(subjectId, { sig, rows });
+    return rows.map((m) => ({ ...m }));
   }
   private save(m: Memory, version = true, reindex = true) {
     this.validateFields(m, m.subject_id);
@@ -1863,6 +1890,8 @@ export class Store {
     if (!reindex) return;
     // P2-11: memory_fts is never queried; writing it on every save only wasted
     // space and CPU, so the dead index is no longer maintained.
+    this.allCache.delete(m.subject_id);
+    this.noteNewMemory(m);
   }
   private validateFields(f: MemoryFields, subjectId?: string) {
     if (subjectId)
@@ -1967,7 +1996,13 @@ export class Store {
     return m;
   }
   private stateToken(subjectId:string){
-    return hash(stable([this.getConfig().revision,this.rows("SELECT id,revision,status FROM memories WHERE subject_id=? ORDER BY id",subjectId)]));
+    const epoch = this.row("SELECT value FROM metadata WHERE key=?","state_epoch:"+subjectId)?.value ?? "0";
+    return hash(stable([this.getConfig().revision, epoch]));
+  }
+  /** v0.7.3: O(1) account state epoch instead of a full-table ORDER BY + hash. */
+  private bumpStateEpoch(subjectId:string){
+    this.db.prepare("INSERT OR IGNORE INTO metadata(key,value) VALUES(?,?)").run("state_epoch:"+subjectId,"0");
+    this.db.prepare("UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key=?").run("state_epoch:"+subjectId);
   }
   private replay<T>(
     ctx: Context,
@@ -2594,6 +2629,66 @@ export class Store {
       .sort((a, b) => b.similarity - a.similarity)
       .slice(0, 3);
   }
+  private countActive(subjectId: string): number {
+    return Number(
+      this.row(
+        "SELECT COUNT(*) n FROM memories WHERE subject_id=? AND status='active' AND merged_into IS NULL",
+        subjectId,
+      )?.n ?? 0,
+    );
+  }
+  /** v0.7.3: build or lazily verify the write-path inverted index once per account. */
+  private ensureTermIndex(subjectId: string) {
+    const count = this.countActive(subjectId);
+    const idx = this.termIndex.get(subjectId);
+    if (idx && this.termIndexCount.get(subjectId) === count) return idx;
+    const fresh = new Map<string, Set<string>>();
+    for (const m of this.all(subjectId)) {
+      if (!this.effective(m) || m.merged_into) continue;
+      for (const term of Store.featuresOfText(m.title, m.content, m.keywords)) {
+        let set = fresh.get(term);
+        if (!set) fresh.set(term, (set = new Set<string>()));
+        set.add(m.id);
+      }
+    }
+    this.termIndex.set(subjectId, fresh);
+    this.termIndexCount.set(subjectId, count);
+    return fresh;
+  }
+  /** Only append the new memory's terms. Stale terms are harmless because the
+   *  caller still re-checks effective() and the exact Jaccard score. */
+  private noteNewMemory(m: Memory) {
+    const idx = this.termIndex.get(m.subject_id);
+    if (!idx || m.status !== "active" || m.merged_into) return;
+    for (const term of Store.featuresOfText(m.title, m.content, m.keywords)) {
+      let set = idx.get(term);
+      if (!set) idx.set(term, (set = new Set<string>()));
+      set.add(m.id);
+    }
+    this.termIndexCount.set(m.subject_id, this.countActive(m.subject_id));
+  }
+  /** Rare-term inverted lookup: O(K) candidates instead of a full O(N) scan. */
+  private candidateIds(subjectId: string, probe: Set<string>): string[] {
+    const idx = this.ensureTermIndex(subjectId);
+    const total = this.termIndexCount.get(subjectId) ?? 0;
+    const maxDf = Math.max(50, Math.floor(total * 0.3));
+    const all = [...probe]
+      .map((term) => ({ term, ids: idx.get(term) }))
+      .filter((x) => !!x.ids && x.ids.size > 0);
+    let ranked = all
+      .filter((x) => x.ids!.size <= maxDf)
+      .sort((a, b) => a.ids!.size - b.ids!.size)
+      .slice(0, 12);
+    if (!ranked.length)
+      ranked = all.sort((a, b) => a.ids!.size - b.ids!.size).slice(0, 3);
+    const hits = new Map<string, number>();
+    for (const r of ranked)
+      for (const id of r.ids!) hits.set(id, (hits.get(id) ?? 0) + 1);
+    return [...hits.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, Store.TERM_CANDIDATE_LIMIT)
+      .map(([id]) => id);
+  }
   private similarLexical(
     ctx: Context,
     input: { title?: string; content: string; keywords?: string[] },
@@ -2607,7 +2702,13 @@ export class Store {
     const configured = this.getConfig().similarityFoldThreshold;
     const threshold = probe.size < 4 ? Math.max(0.9, configured) : configured;
     const results: { id: string; content: string; similarity: number }[] = [];
-    for (const m of this.all(ctx.subjectId)) {
+    for (const id of this.candidateIds(ctx.subjectId, probe)) {
+      let m: Memory;
+      try {
+        m = this.load(ctx, id);
+      } catch {
+        continue;
+      }
       if (!this.effective(m)) continue;
       const similarity = Store.jaccard(probe, this.featuresOf(m));
       if (similarity >= threshold)
@@ -2663,8 +2764,16 @@ export class Store {
     if (!this.effective(target)) return;
     const targetFeatures = this.featuresOf(target);
     const near: { id: string; similarity: number }[] = [];
-    for (const other of this.all(subjectId)) {
-      if (other.id === memoryId || !this.effective(other)) continue;
+    const adminCtx = { subjectId, admin: true } as Context;
+    for (const id of this.candidateIds(subjectId, targetFeatures)) {
+      if (id === memoryId) continue;
+      let other: Memory;
+      try {
+        other = this.load(adminCtx, id);
+      } catch {
+        continue;
+      }
+      if (!this.effective(other)) continue;
       const similarity = Store.jaccard(targetFeatures, this.featuresOf(other));
       if (similarity >= this.getConfig().similarityBuildThreshold) near.push({ id: other.id, similarity });
     }
@@ -4026,6 +4135,15 @@ export class Store {
               )
               .run(current.id, normalize(term), Date.now());
           this.trimTerms(current.id);
+          const cached = this.allCache.get(ctx.subjectId);
+          if (cached) {
+            const row = cached.rows.find((m) => m.id === current.id);
+            if (row) {
+              row.retrieval_count = current.retrieval_count;
+              row.last_retrieved_at = current.last_retrieved_at;
+              row.weight = weight(row, this.getConfig());
+            }
+          }
         }
         return {
           ...this.compact(item),
@@ -4083,15 +4201,28 @@ export class Store {
           evaluation?.hit_at_1 ? 1 : 0,
           evaluation?.hit_at_3 ? 1 : 0,
         );
-      return {
-        data: measured({
+      // v0.7.3: measured() reports the WHOLE data object, while token_budget
+      // is documented in the same unit. Drop tail items until the response
+      // really fits, so clients can trust the budget.
+      let trimmed = false;
+      const budget = input.token_budget ?? this.getConfig().tokenBudget;
+      const buildPayload = () =>
+        measured({
           items,
           mode: prepared.mode,
           estimated_tokens: prepared.estimatedTokens,
-          estimated: true,
-          budget_exhausted: prepared.budgetExhausted,
+          estimated: true as const,
+          budget_exhausted: prepared.budgetExhausted || trimmed,
           ...(evaluation ? { evaluation } : {}),
-        }),
+        });
+      let payload = buildPayload();
+      while (payload.estimated_tokens > budget && items.length > 0) {
+        items.pop();
+        trimmed = true;
+        payload = buildPayload();
+      }
+      return {
+        data: payload,
         ids: items.map((m) => m.id),
         effective: true,
         // 纯词法检索是默认且正常的状态，默认不再附带「语义不可用」这类降级警告；
@@ -5275,6 +5406,9 @@ export class Store {
         response.error={code:"NEEDS_REVIEW",message:"Similar memories require a distinct_reason before adding.",retryable:false};
         return response;
       }
+      // v0.7.3: memory_search is a read. Bumping the epoch on every search would
+      // change state_token on every call and break replay of empty snapshots.
+      if(tool!=="memory_search")this.bumpStateEpoch(ctx.subjectId);
       if(!(result.ids?.length))response.state_token=this.stateToken(ctx.subjectId);
       this.db.prepare("DELETE FROM dedup WHERE created_at<?").run(Date.now()-DEDUP_TTL_MS);
       this.db.prepare("DELETE FROM dedup WHERE rowid IN (SELECT rowid FROM dedup ORDER BY created_at DESC LIMIT -1 OFFSET ?)").run(DEDUP_MAX_ROWS-1);
