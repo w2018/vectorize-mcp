@@ -208,7 +208,7 @@ export function createMcpHandler<C>(service: McpService<C>) {
             const silent =
               !isError &&
               !needsReview &&
-              (name === "memory_add" ||
+              ((name === "memory_add" && data?.status === "created") ||
                 name === "memory_update" ||
                 (name === "memory_archive" && args.action !== "preview"));
             return {

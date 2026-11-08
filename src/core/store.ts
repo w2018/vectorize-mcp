@@ -1009,17 +1009,14 @@ export class Store {
       };
       // Break self-references before deleting so the merged_into foreign key never blocks.
       this.db.prepare("UPDATE memories SET merged_into=NULL WHERE subject_id=?").run(subjectId);
+      this.deleteMemoryRows(memoryIds);
+      this.db.prepare("DELETE FROM similarity_groups WHERE subject_id=?").run(subjectId);
+      this.db.prepare("DELETE FROM maintenance_jobs WHERE subject_id=?").run(subjectId);
+      this.db.prepare("DELETE FROM merge_batches WHERE subject_id=?").run(subjectId);
       this.db.prepare("DELETE FROM links WHERE subject_id=?").run(subjectId);
-      if (memoryIds.length) {
-        const marks = memoryIds.map(() => "?").join(",");
-        this.db.prepare(`DELETE FROM vectors WHERE memory_id IN (${marks})`).run(...memoryIds);
-        this.db.prepare(`DELETE FROM query_terms WHERE memory_id IN (${marks})`).run(...memoryIds);
-        this.db.prepare(`DELETE FROM versions WHERE memory_id IN (${marks})`).run(...memoryIds);
-      }
       this.db.prepare("DELETE FROM memory_fts WHERE subject_id=?").run(subjectId);
       this.db.prepare("DELETE FROM bot_profiles WHERE subject_id=?").run(subjectId);
       this.db.prepare("DELETE FROM tokens WHERE subject_id=?").run(subjectId);
-      this.db.prepare("DELETE FROM memories WHERE subject_id=?").run(subjectId);
       this.db.prepare("DELETE FROM imports WHERE subject_id=?").run(subjectId);
       this.db.prepare("DELETE FROM previews WHERE json_extract(payload,'$.subjectId')=?").run(subjectId);
       this.db.prepare("DELETE FROM dedup WHERE actor LIKE '%'||?").run(subjectId);
@@ -1133,6 +1130,30 @@ export class Store {
       );
     }
   }
+  /** Delete memory rows and all dependent rows, including the consolidation
+   * subsystem. Callers must handle merged_into dependents first. */
+  private deleteMemoryRows(ids: string[]) {
+    const unique = [...new Set(ids)];
+    if (!unique.length) return;
+    const marks = unique.map(() => "?").join(",");
+    this.db
+      .prepare(`DELETE FROM similarity_group_members WHERE memory_id IN (${marks})`)
+      .run(...unique);
+    this.db
+      .prepare(`DELETE FROM versions WHERE memory_id IN (${marks})`)
+      .run(...unique);
+    this.db
+      .prepare(`DELETE FROM vectors WHERE memory_id IN (${marks})`)
+      .run(...unique);
+    this.db
+      .prepare(`DELETE FROM query_terms WHERE memory_id IN (${marks})`)
+      .run(...unique);
+    this.db
+      .prepare(`DELETE FROM links WHERE source_id IN (${marks}) OR target_id IN (${marks})`)
+      .run(...unique, ...unique);
+    this.db.prepare(`DELETE FROM memory_fts WHERE id IN (${marks})`).run(...unique);
+    this.db.prepare(`DELETE FROM memories WHERE id IN (${marks})`).run(...unique);
+  }
   deleteToTrash(
     subjectId: string,
     input: {
@@ -1186,16 +1207,8 @@ export class Store {
             record.updated_at = Date.now();
             this.save(record);
           }
-          for (const table of ["versions", "vectors", "query_terms"])
-            this.db
-              .prepare("DELETE FROM " + table + " WHERE memory_id=?")
-              .run(id);
-          this.db
-            .prepare("DELETE FROM links WHERE source_id=? OR target_id=?")
-            .run(id, id);
-          this.db.prepare("DELETE FROM memory_fts WHERE id=?").run(id);
-          this.db.prepare("DELETE FROM memories WHERE id=?").run(id);
         }
+        this.deleteMemoryRows(snapshots.map((s) => s.item.id));
         this.audit(
           ctx,
           "memory.delete",
@@ -1940,7 +1953,10 @@ export class Store {
         };
       }
       const similar = input.embedding
-        ? this.similar(ctx, input.embedding)
+        ? this.mergeSimilarCandidates(
+            this.similar(ctx, input.embedding),
+            this.similarLexical(ctx, input),
+          )
         : this.similarLexical(ctx, input);
       if (similar.length && !input.distinct_reason)
         return {
@@ -2215,6 +2231,8 @@ export class Store {
         m.archive_reason = input.reason;
         m.revision++;
         m.updated_at = Date.now();
+        m.embedding_state = "pending";
+        this.db.prepare("DELETE FROM vectors WHERE memory_id=?").run(m.id);
         this.save(m);
       }
       return {
@@ -2235,6 +2253,8 @@ export class Store {
       m.archive_reason = null;
       m.revision++;
       m.updated_at = Date.now();
+      m.embedding_state = "pending";
+      this.db.prepare("DELETE FROM vectors WHERE memory_id=?").run(m.id);
       this.profileSlot(m);
       this.save(m);
       return {
@@ -2250,7 +2270,7 @@ export class Store {
   }
   merge(ctx: Context, input: MergeInput) {
     return this.mutate(ctx, "memory_merge", input, () => {
-      check(input.sources.length >= 1 && input.sources.length <= 4);
+      check(input.sources.length >= 1 && input.sources.length <= 8);
       const refs = [input.target, ...input.sources];
       check(new Set(refs.map((r) => r.id)).size === refs.length);
       const items = refs.map((r) => {
@@ -2262,22 +2282,23 @@ export class Store {
         check(ctx.admin || !this.protected(m), "PROTECTED_MEMORY");
         return m;
       });
-      const target = items[0]!,
+      let target = items[0]!,
         sources = items.slice(1);
-      this.text(input.reason, 1, 500);
-      this.validateFields({ ...target, content: input.final_content });
-      const duplicate = this.duplicate(
-        ctx,
-        input.final_content,
-        target.id,
-      );
+      const duplicate = this.duplicate(ctx, input.final_content, target.id);
       if (duplicate) {
         const duplicateIsSource = sources.some((s) => s.id === duplicate.id);
         if (!(duplicateIsSource && input.allow_source_duplicates))
           throw new DomainError(
             duplicateIsSource ? "CANONICAL_TARGET_REQUIRED" : "DUPLICATE_CONTENT",
           );
+        if (duplicateIsSource) {
+          const canonical = sources.find((s) => s.id === duplicate.id)!;
+          sources = items.filter((m) => m.id !== canonical.id);
+          target = canonical;
+        }
       }
+      this.text(input.reason, 1, 500);
+      this.validateFields({ ...target, content: input.final_content });
       const count = items.reduce((n, m) => n + BigInt(m.retrieval_count), 0n);
       check(count <= 9223372036854775807n);
       target.content = input.final_content;
@@ -2300,6 +2321,8 @@ export class Store {
         source.merged_into = target.id;
         source.revision++;
         source.updated_at = Date.now();
+        source.embedding_state = "pending";
+        this.db.prepare("DELETE FROM vectors WHERE memory_id=?").run(source.id);
         this.save(source);
       }
       this.save(target);
@@ -2408,6 +2431,20 @@ export class Store {
    * 纯词法模式下的写入近重复检查：不依赖向量。
    * 与同账户现存记忆做字符 bigram Jaccard 比较，超过 similarityFoldThreshold 视为高重合。
    */
+  private mergeSimilarCandidates(
+    ...lists: { id: string; content: string; similarity: number }[][]
+  ): { id: string; content: string; similarity: number }[] {
+    const merged = new Map<string, { id: string; content: string; similarity: number }>();
+    for (const list of lists)
+      for (const candidate of list) {
+        const previous = merged.get(candidate.id);
+        if (!previous || candidate.similarity > previous.similarity)
+          merged.set(candidate.id, candidate);
+      }
+    return [...merged.values()]
+      .sort((a, b) => b.similarity - a.similarity)
+      .slice(0, 3);
+  }
   private similarLexical(
     ctx: Context,
     input: { title?: string; content: string; keywords?: string[] },
@@ -2417,11 +2454,12 @@ export class Store {
       input.content,
       input.keywords ?? [],
     );
-    if (probe.size < 4) return [];
-    const threshold = this.getConfig().similarityFoldThreshold;
+    if (!probe.size) return [];
+    const configured = this.getConfig().similarityFoldThreshold;
+    const threshold = probe.size < 4 ? Math.max(0.9, configured) : configured;
     const results: { id: string; content: string; similarity: number }[] = [];
     for (const m of this.all(ctx.subjectId)) {
-      if (m.status === "archived") continue;
+      if (!this.effective(m)) continue;
       const similarity = Store.jaccard(probe, this.featuresOf(m));
       if (similarity >= threshold)
         results.push({
@@ -3009,8 +3047,9 @@ export class Store {
     const filter = groupIds && groupIds.length ? new Set(groupIds) : null;
     const entries = batchDetail.filter((e) => !filter || filter.has(e.group_id));
     check(entries.length > 0, "NOT_FOUND");
-    const undone = new Set(entries.map((e) => e.group_id));
-    const remaining = batchDetail.filter((e) => !undone.has(e.group_id));
+    // Keep every entry by default. A group is removed from the batch only after it
+    // has been restored successfully; a skipped group must remain retryable.
+    const keep = new Map(batchDetail.map((entry) => [entry.group_id, entry]));
     let restored = 0;
     const skipped: string[] = [];
     this.tx(() => {
@@ -3037,13 +3076,18 @@ export class Store {
           memory.merged_into = null;
           memory.archived_at = null;
           memory.archive_reason = null;
+          // undo may follow a merge that rewrote a source hash to avoid UNIQUE;
+          // always recompute from the restored content.
+          memory.content_hash = hash(normalize(memory.content));
           memory.revision++;
           memory.updated_at = Date.now();
           this.save(memory);
           restored++;
         }
         this.db.prepare("UPDATE similarity_groups SET status='stale', updated_at=? WHERE id=?").run(Date.now(), raw.group_id);
+        keep.delete(raw.group_id);
       }
+      const remaining = [...keep.values()];
       if (remaining.length) {
         this.db
           .prepare("UPDATE merge_batches SET detail=?, groups=? WHERE id=?")
@@ -3053,7 +3097,7 @@ export class Store {
       }
       return restored;
     });
-    return { restored, skipped, remaining: remaining.length };
+    return { restored, skipped, remaining: keep.size };
   }
   /** 读取合并批次详情（含合并前后的原文，用于对比与逐组撤回）。 */
   getMergeBatch(subjectId: string, batchId: string): MergeBatch | null {
@@ -3463,15 +3507,31 @@ export class Store {
       );
       for (const id of input.expected_ids) check(uuid(id));
     }
-    // 检索词来自 keywords + query 本身；中文额外拆 2 字词，避免「必须显式给 keywords 才命中」。
+    // 检索词来自 keywords + query 本身。关键词是用户显式给出的高置信信号，
+    // query 分词是次一级信号，中文 bigram 只是兜底，必须降权；否则长自然问句中的
+    // 虚词 bigram 会稀释真实实体词的权重，造成整条漏检。
     const terms: string[] = [];
-    const addTerm = (value: string) => {
+    const termWeights = new Map<string, number>();
+    const STOPWORDS = new Set([
+      "的", "了", "吗", "呢", "吧", "啊", "呀", "哦", "嗯", "是", "我", "你",
+      "他", "她", "它", "我们", "你们", "他们", "这", "那", "这个", "那个",
+      "什么", "怎么", "为什么", "可以", "能够", "是否", "一个", "一些", "有",
+      "在", "和", "就", "都", "也", "还", "很", "要", "会", "把", "被", "给",
+      "对", "与", "及", "或", "而", "但", "如果", "因为", "所以", "已经",
+      "正在", "没有", "不是", "这样", "那样",
+    ]);
+    const STOP_CHARS = new Set([...STOPWORDS].filter((word) => [...word].length === 1));
+    const addTerm = (value: string, weight = 1, force = false) => {
       const token = normalize(value).toLowerCase();
-      if (token && !terms.includes(token)) terms.push(token);
+      if (!token) return;
+      if (!force && STOPWORDS.has(token)) return;
+      if (!terms.includes(token)) {
+        terms.push(token);
+        termWeights.set(token, weight);
+      } else {
+        termWeights.set(token, Math.max(termWeights.get(token) ?? 1, weight));
+      }
     };
-    const queryParts: string[] = [...(input.keywords ?? [])];
-    for (const piece of input.query.split(/[^\p{L}\p{N}]+/u))
-      if (piece) queryParts.push(piece);
     // 少量口语同义词扩展：把「为什么/原因/坑/没做/进展」等意图词映射到记忆里
     // 常用的书面说法，弥补纯字面匹配对自然提问不友好的问题。
     const SYNONYMS: Record<string, string[]> = {
@@ -3489,14 +3549,25 @@ export class Store {
       喜欢: ["偏好"],
       不喜欢: ["避免"],
     };
-    for (const part of queryParts) {
-      addTerm(part);
+    const addExpansion = (part: string, baseWeight: number) => {
       for (const [needle, extras] of Object.entries(SYNONYMS))
-        if (part.includes(needle)) for (const extra of extras) addTerm(extra);
+        if (part.includes(needle))
+          for (const extra of extras) addTerm(extra, Math.max(0.5, baseWeight * 0.5));
+    };
+    for (const keyword of input.keywords ?? []) {
+      addTerm(keyword, 2, true);
+      addExpansion(keyword, 2);
+    }
+    for (const part of input.query.split(/[^\p{L}\p{N}]+/u)) {
+      if (!part) continue;
+      addTerm(part, 1);
+      addExpansion(part, 1);
       const chars = [...part];
       if (chars.length >= 2 && /[\u4e00-\u9fff]/.test(part))
-        for (let i = 0; i < chars.length - 1; i++)
-          addTerm(chars[i] + chars[i + 1]);
+        for (let i = 0; i < chars.length - 1; i++) {
+          if (STOP_CHARS.has(chars[i]!) && STOP_CHARS.has(chars[i + 1]!)) continue;
+          addTerm(chars[i] + chars[i + 1], 0.35);
+        }
     }
     if (terms.length > 60) terms.length = 60;
     const now = Date.now();
@@ -3554,7 +3625,9 @@ export class Store {
         Math.log(1 + candidateMemories.length / (1 + dfMap.get(term)!)) + 0.1,
       );
     let totalWeight = 0;
-    for (const term of terms) if (dfMap.get(term)! > 0) totalWeight += idf.get(term)!;
+    for (const term of terms)
+      if (dfMap.get(term)! > 0)
+        totalWeight += idf.get(term)! * (termWeights.get(term) ?? 1);
     const candidates = candidateMemories;
     let semantic = false;
     const scored: SearchItem[] = [];
@@ -3568,7 +3641,9 @@ export class Store {
           let factor = 1;
           if (fields.title.includes(term)) factor *= 1.2;
           if (fields.keywords.includes(term)) factor *= 1.1;
-          return sum + idf.get(term)! * factor;
+          return (
+            sum + idf.get(term)! * (termWeights.get(term) ?? 1) * factor
+          );
         }, 0),
         rawLexical = totalWeight ? matchedWeight / totalWeight : 0,
         lexical = Math.min(1, rawLexical);
@@ -3577,7 +3652,9 @@ export class Store {
       // 饱和到 1，只有「标题命中」能把真正的那条记忆区分出来。
       const matchedTitleWeight = terms.reduce(
         (sum, term) =>
-          fields.title.includes(term) ? sum + idf.get(term)! : sum,
+          fields.title.includes(term)
+            ? sum + idf.get(term)! * (termWeights.get(term) ?? 1)
+            : sum,
         0,
       );
       titleScore.set(
@@ -4897,22 +4974,14 @@ export class Store {
         items: input.items,
         reason: input.reason,
       });
-      for (const i of input.items) {
-        this.db
-          .prepare("UPDATE memories SET merged_into=NULL WHERE id=?")
-          .run(i.id);
-        for (const table of ["versions", "vectors", "query_terms"])
-          this.db
-            .prepare("DELETE FROM " + table + " WHERE memory_id=?")
-            .run(i.id);
-        this.db
-          .prepare("DELETE FROM links WHERE source_id=? OR target_id=?")
-          .run(i.id, i.id);
-        this.db.prepare("DELETE FROM memory_fts WHERE id=?").run(i.id);
-      }
+      const ids = input.items.map((i) => i.id);
       for (const i of input.items)
-        this.db.prepare("DELETE FROM memories WHERE id=?").run(i.id);
-      for(const i of input.items)this.db.prepare("DELETE FROM dedup WHERE EXISTS(SELECT 1 FROM json_each(dedup.snapshots) WHERE json_extract(value,'$.id')=?)").run(i.id);
+        this.db.prepare("UPDATE memories SET merged_into=NULL WHERE id=?").run(i.id);
+      this.deleteMemoryRows(ids);
+      for (const i of input.items)
+        this.db.prepare(
+          "DELETE FROM dedup WHERE EXISTS(SELECT 1 FROM json_each(dedup.snapshots) WHERE json_extract(value,'$.id')=?)",
+        ).run(i.id);
       this.audit(
         ctx,
         "purge",
