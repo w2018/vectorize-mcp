@@ -1528,8 +1528,8 @@ const fields: {
   {
     key: "protectedImportance",
     label: "受保护的重要程度",
-    help: "达到此值或画像类型的记忆不允许助手普通归档。",
-    min: 1,
+    help: "达到此值或画像类型的记忆不允许助手普通归档；60～99，过低会锁死普通记忆。",
+    min: 60,
     max: 99,
     defaultValue: "80",
     advanced: true,

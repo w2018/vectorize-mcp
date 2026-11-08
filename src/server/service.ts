@@ -1256,7 +1256,7 @@ export class MemoryService implements McpService<Context> {
               target_id: string;
               archived: { id: string; revision: number }[];
               revision: number;
-            }>("groups", "mergeSimilarityGroup", ctx, groupId, draft.content);
+            }>("groups", "mergeSimilarityGroup", ctx, groupId, draft);
             detail.push({
               group_id: merged.group_id,
               target_id: merged.target_id,

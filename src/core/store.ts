@@ -29,6 +29,7 @@ import type {
   Context,
   Config,
   Memory,
+  MemoryType,
   MemoryFields,
   MemoryFilters,
   Source,
@@ -124,10 +125,16 @@ const defaults: Config = {
   llmModel: "",
 };
 export function weight(
-  m: Pick<Memory, "importance" | "retrieval_count" | "confirmed_at">,
+  m: Pick<
+    Memory,
+    "importance" | "retrieval_count" | "confirmed_at" | "updated_at"
+  >,
   c: Config = defaults,
   now = Date.now(),
 ) {
+  // P2-13: recentness follows the latest edit or confirmation, so a memory
+  // edited today is not treated as stale just because it was confirmed long ago.
+  const lastTouched = Math.max(Number(m.updated_at), Number(m.confirmed_at));
   return (
     (c.importanceFactor * m.importance) / 99 +
     c.frequencyFactor *
@@ -136,7 +143,7 @@ export function weight(
         1,
       ) +
     c.recencyFactor *
-      2 ** (-Math.max(0, now - m.confirmed_at) / 86400000 / c.halfLifeDays)
+      2 ** (-Math.max(0, now - lastTouched) / 86400000 / c.halfLifeDays)
   );
 }
 export class Store {
@@ -151,6 +158,8 @@ export class Store {
     string,
     { revision: number; features: Set<string> }
   >();
+  /** P2-11: cap the in-memory feature cache so a long-lived process stays bounded. */
+  private static readonly FEATURE_CACHE_LIMIT = 5000;
   constructor(
     public readonly path: string,
     options: {
@@ -887,7 +896,13 @@ export class Store {
           "UPDATE subjects SET access_state=?,auth_epoch=auth_epoch+1 WHERE id=?",
         )
         .run("unbound", t!.subject_id);
-      this.db.prepare("DELETE FROM previews WHERE actor=?").run(tokenId);
+      // P2-15: previews are owned by the admin actor, not the token. Remove
+      // pending previews whose payload references this token instead of a no-op.
+      this.db
+        .prepare(
+          "DELETE FROM previews WHERE action IN ('revoke','rotate','token_delete') AND payload LIKE ?",
+        )
+        .run("%" + tokenId + "%");
       this.audit(this.adminFor(String(t!.subject_id)), "token.revoke", [
         tokenId,
       ]);
@@ -1064,10 +1079,13 @@ export class Store {
   private tokenSnapshot(id: string) {
     const t = this.row("SELECT * FROM tokens WHERE id=?", id);
     check(t, "NOT_FOUND");
+    // P2-08: a trash snapshot must not carry any key material. Keeping
+    // secret_enc would allow recovery when DB + token-key leak; keep metadata only.
+    const { secret_enc: _secret, digest: _digest, ...metadata } = t!;
     return {
       schema_version: 1 as const,
       subject_label: this.subjectLabel(String(t!.subject_id)),
-      token: t,
+      token: metadata,
     };
   }
   listTrash(filters: { kind?: string; offset?: number; limit?: number } = {}) {
@@ -1341,7 +1359,9 @@ export class Store {
           !this.row("SELECT id FROM memories WHERE id=?", memory.id),
           "RESTORE_BLOCKED",
         );
-        this.save(memory, false);
+        // P2-07: write the restored current revision into versions before
+        // replaying historical rows, so the version chain has no gap.
+        this.save(memory);
         for (const v of payload.versions ?? [])
           this.db.prepare("INSERT OR REPLACE INTO versions VALUES (?,?,?)").run(
             memory.id,
@@ -1603,9 +1623,24 @@ export class Store {
       Array.isArray(ids) &&
         ids.length >= 1 &&
         ids.length <= 200 &&
-        new Set(ids).size === ids.length,
+        new Set(ids).size === ids.length &&
+        ids.every((id) => uuid(id)),
+      "VALIDATION_ERROR",
+      "回收站编号格式不正确。",
     );
-    return this.trashVault().delete(ids);
+    // P2-09: capture actor/subject before deletion so the purge leaves an audit trail.
+    const snapshots = ids
+      .map((id) => this.trashVault().get(id))
+      .filter((item): item is NonNullable<typeof item> => Boolean(item));
+    const result = this.trashVault().delete(ids);
+    for (const item of snapshots) {
+      if (!this.row("SELECT id FROM subjects WHERE id=?", item.source_subject_id))
+        continue;
+      this.audit(this.adminFor(item.source_subject_id), "trash.delete", [
+        item.id,
+      ]);
+    }
+    return result;
   }
   statsByAccount(days = 30) {
     check(Number.isInteger(days) && days >= 1 && days <= 3650);
@@ -1761,14 +1796,8 @@ export class Store {
         .prepare("INSERT OR REPLACE INTO versions VALUES (?,?,?)")
         .run(m.id, m.revision, JSON.stringify(m));
     if (!reindex) return;
-    // Retained for compatibility; substring retrieval currently does not query this index.
-    this.db.prepare("DELETE FROM memory_fts WHERE id=?").run(m.id);
-    const text = [m.title, m.content, ...m.keywords].join(" "),
-      cjk = [...text].filter((c) => /[\p{Script=Han}]/u.test(c));
-    const grams = cjk.slice(0, -1).map((c, i) => c + cjk[i + 1]);
-    this.db
-      .prepare("INSERT INTO memory_fts VALUES (?,?,?)")
-      .run(m.id, m.subject_id, text + " " + grams.join(" "));
+    // P2-11: memory_fts is never queried; writing it on every save only wasted
+    // space and CPU, so the dead index is no longer maintained.
   }
   private validateFields(f: MemoryFields, subjectId?: string) {
     if (subjectId)
@@ -1932,11 +1961,18 @@ export class Store {
       const duplicate = this.duplicate(ctx, input.content);
       if (duplicate) {
         if (input.source) {
-          duplicate.sources = this.sources([
+          const mergedSources = this.sources([
             ...duplicate.sources,
             input.source,
           ]);
-          this.save(duplicate, false);
+          // P2-01: a genuinely new source is a content-adjacent change and must
+          // leave an auditable version trail instead of silently mutating data.
+          if (mergedSources.length > duplicate.sources.length) {
+            duplicate.sources = mergedSources;
+            duplicate.revision++;
+            duplicate.updated_at = Date.now();
+            this.save(duplicate);
+          }
         }
         return {
           data: {
@@ -2020,6 +2056,13 @@ export class Store {
       const m = this.load(ctx, input.id);
       check(m.revision === input.expected_revision, "REVISION_CONFLICT");
       check(!m.merged_into, "MERGED_MEMORY");
+      // P2-03: editing an archived memory would change content while leaving it
+      // invisible; require an explicit restore first.
+      check(
+        m.status === "active",
+        "MEMORY_NOT_ACTIVE",
+        "只能编辑使用中的记忆，请先恢复归档记忆。",
+      );
       this.text(input.reason, 1, 500);
       const allowed = [
         "title",
@@ -2143,6 +2186,13 @@ export class Store {
       );
       if (r) check(r.revision === input.expected_revision, "REVISION_CONFLICT");
       else check(input.expected_revision === undefined, "REVISION_CONFLICT");
+      // P2-04: only effective endpoints may gain a new edge. Removal stays
+      // available so stale links can always be cleaned up.
+      if (input.action === "upsert" && (!this.effective(source) || !this.effective(target)))
+        throw new DomainError(
+          "MEMORY_NOT_EFFECTIVE",
+          "关联端点必须处于使用中且未过期的状态。",
+        );
       if (input.action === "remove") {
         if (r) this.db.prepare("DELETE FROM links WHERE id=?").run(r.id);
         return {
@@ -2298,10 +2348,15 @@ export class Store {
         }
       }
       this.text(input.reason, 1, 500);
-      this.validateFields({ ...target, content: input.final_content });
+      if (input.draft?.title !== undefined) target.title = input.draft.title;
+      if (input.draft?.type) target.type = input.draft.type;
+      if (input.draft?.keywords) target.keywords = [...new Set(input.draft.keywords)];
+      if (input.draft?.importance !== undefined)
+        target.importance = input.draft.importance;
+      target.content = input.final_content;
+      this.validateFields(target);
       const count = items.reduce((n, m) => n + BigInt(m.retrieval_count), 0n);
       check(count <= 9223372036854775807n);
-      target.content = input.final_content;
       target.content_hash = hash(normalize(target.content));
       target.retrieval_count = String(count);
       target.sources = this.sources(
@@ -2376,6 +2431,26 @@ export class Store {
               "INSERT INTO query_terms VALUES (?,?,?,?) ON CONFLICT(memory_id,term) DO UPDATE SET count=count+excluded.count,last_seen_at=max(last_seen_at,excluded.last_seen_at)",
             )
             .run(target.id, term.term, term.count, term.last_seen_at);
+        // P2-05: source terms must not survive as orphaned rows.
+        this.db.prepare("DELETE FROM query_terms WHERE memory_id=?").run(source.id);
+      }
+      // P2-06: any consolidation group that still points at an archived source
+      // becomes merged/stale so rebuilds do not keep recommending it.
+      const archivedIds = [...ids];
+      if (archivedIds.length) {
+        const marks = archivedIds.map(() => "?").join(",");
+        const affected = this.rows(
+          "SELECT DISTINCT group_id FROM similarity_group_members WHERE memory_id IN (" +
+            marks +
+            ")",
+          ...archivedIds,
+        );
+        for (const row of affected)
+          this.db
+            .prepare(
+              "UPDATE similarity_groups SET status='merged',updated_at=? WHERE id=? AND status IN ('proposed','ignored','merging')",
+            )
+            .run(Date.now(), String(row.group_id));
       }
       this.trimTerms(target.id);
       return {
@@ -2424,6 +2499,11 @@ export class Store {
     const cached = this.featureCache.get(m.id);
     if (cached && cached.revision === m.revision) return cached.features;
     const features = Store.featuresOfText(m.title, m.content, m.keywords);
+    // P2-11: simple LRU-style bound; delete the oldest inserted key when full.
+    if (this.featureCache.size >= Store.FEATURE_CACHE_LIMIT) {
+      const oldest = this.featureCache.keys().next().value;
+      if (oldest !== undefined) this.featureCache.delete(oldest);
+    }
     this.featureCache.set(m.id, { revision: m.revision, features });
     return features;
   }
@@ -2979,8 +3059,19 @@ export class Store {
   mergeSimilarityGroup(
     ctx: Context,
     groupId: string,
-    finalContent: string,
+    final:
+      | string
+      | {
+          content: string;
+          title?: string;
+          type?: MemoryType;
+          keywords?: string[];
+          importance?: number;
+          reason?: string;
+        },
   ): { group_id: string; target_id: string; archived: { id: string; revision: number }[]; revision: number } {
+    const finalContent = typeof final === "string" ? final : final.content;
+    const draft = typeof final === "string" ? undefined : final;
     const group = this.getSimilarityGroup(ctx.subjectId, groupId);
     check(group, "NOT_FOUND");
     check(group.status === "proposed" || group.status === "ignored", "GROUP_STATUS");
@@ -3005,9 +3096,17 @@ export class Store {
       target: { id: target.memory_id, revision: target.revision },
       sources: sources.map((m) => ({ id: m.memory_id, revision: m.revision })),
       final_content: finalContent,
-      reason: "模型压缩去重合并",
+      reason: draft?.reason || "模型压缩去重合并",
       source: { platform: "memory-consolidation" },
       allow_source_duplicates: true,
+      draft: draft
+        ? {
+            title: draft.title,
+            type: draft.type,
+            keywords: draft.keywords,
+            importance: draft.importance,
+          }
+        : undefined,
     } as MergeInput);
     const data = result.data as { target_id: string; revision: number; archived_ids: string[] };
     this.db
@@ -3391,6 +3490,9 @@ export class Store {
     const query = Buffer.from(new Float32Array(embedding.vector).buffer);
     const results: { id: string; content: string; similarity: number }[] = [];
     for (const m of this.all(ctx.subjectId)) {
+      // P2-02: vector dedupe must use the same effective/active gate as the
+      // lexical branch, otherwise archived or expired memories resurface.
+      if (!this.effective(m)) continue;
       const v = this.row(
         "SELECT vector FROM vectors WHERE memory_id=? AND revision=? AND model=?",
         m.id,
@@ -4196,10 +4298,11 @@ export class Store {
       "VALIDATION_ERROR",
       "「频率饱和值」必须不小于 1。",
     );
+    // P2-12: a value like 1 would lock almost every memory against normal agents.
     check(
-      config.protectedImportance >= 1 && config.protectedImportance <= 99,
+      config.protectedImportance >= 60 && config.protectedImportance <= 99,
       "VALIDATION_ERROR",
-      "「受保护的重要程度」需在 1～99 之间。",
+      "「受保护的重要程度」需在 60～99 之间（过低会锁死普通记忆）。",
     );
     check(
       config.minArchivedDays >= 30,

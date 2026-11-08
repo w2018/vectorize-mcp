@@ -113,6 +113,13 @@ export interface MergeInput extends Request {
   source?: Source;
   /** 仅供相似分组内部合并：允许最终正文与组内某条来源完全相同，仍把它们归档。 */
   allow_source_duplicates?: boolean;
+  /** P2-18: 预览阶段已确定的元数据，后台任务直接复用，避免二次模型结果漂移。 */
+  draft?: {
+    title?: string;
+    type?: MemoryType;
+    keywords?: string[];
+    importance?: number;
+  };
 }
 export interface LinkInput extends Request {
   action: "upsert" | "remove";
