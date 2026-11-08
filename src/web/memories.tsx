@@ -400,7 +400,15 @@ export function Memories({
   const [editing, setEditing] = useState<Memory | null | undefined>();
   const [detail, setDetail] = useState<Memory | null>(null);
   const [similar, setSimilar] = useState<
-    { id: string; content: string; type: MemoryType; importance: number; similarity: number }[]
+    {
+      id: string;
+      content: string;
+      type: MemoryType;
+      importance: number;
+      similarity: number;
+      memory_status: string;
+      merged_into: string | null;
+    }[]
   >([]);
   const [preview, setPreview] = useState<{
     value: Preview;
@@ -435,7 +443,15 @@ export function Memories({
     }
     let live = true;
     api<
-      { id: string; content: string; type: MemoryType; importance: number; similarity: number }[]
+      {
+        id: string;
+        content: string;
+        type: MemoryType;
+        importance: number;
+        similarity: number;
+        memory_status: string;
+        merged_into: string | null;
+      }[]
     >("/memories/" + detail.id + "/similar" + query({ subject_id: subject }))
       .then((rows) => {
         if (live) setSimilar(rows);
@@ -456,6 +472,19 @@ export function Memories({
     setDetail(null);
     setReasonText("管理员整理");
     setReasonRequest({ memory: m, kind });
+  }
+  const similarById = new Map(similar.map((item) => [item.id, item]));
+  const mergeDestination = detail?.merged_into
+    ? similarById.get(detail.merged_into)
+    : undefined;
+  function similarRelation(item: (typeof similar)[number]): string {
+    if (detail && item.id === detail.merged_into) return "合并目标·参与检索";
+    if (detail?.merged_into && item.merged_into === detail.merged_into)
+      return "同组合并来源·不参与检索";
+    if (detail && item.merged_into === detail.id) return "合并来源·不参与检索";
+    if (item.merged_into) return "已并入其他记忆·不参与检索";
+    if (item.memory_status === "archived") return "已归档·不参与检索";
+    return "参与检索";
   }
   async function previewReason() {
     if (!reasonRequest || !reasonText.trim()) return;
@@ -538,7 +567,7 @@ export function Memories({
           >
             <option value="active">已激活（参与检索）</option>
             <option value="archived">已归档（不参与检索）</option>
-            <option value="merged">已合并来源（不参与检索）</option>
+            <option value="merged">已并入其他记忆（不参与检索）</option>
           </select>
         </div>
         <State
@@ -559,13 +588,13 @@ export function Memories({
                       }
                       title={
                         m.merged_into
-                          ? "已合并进其他记忆，作为来源保留，不参与检索"
+                          ? "已并入其他记忆，作为来源保留，不参与检索"
                           : m.status === "archived"
                             ? "已归档，不参与检索"
                             : "已激活，参与检索"
                       }
                     >
-                      {m.merged_into ? "已合并来源" : m.status === "archived" ? "已归档" : "参与检索"}
+                      {m.merged_into ? "已并入其他记忆" : m.status === "archived" ? "已归档" : "参与检索"}
                     </span>
                     {m.profile && (
                       <span
@@ -673,9 +702,14 @@ export function Memories({
               (detail.merged_into ? "merged" : detail.status === "archived" ? "archived" : "active")
             }
           >
-            {detail.merged_into ? "已合并来源" : detail.status === "archived" ? "已归档" : "参与检索"}
+            {detail.merged_into ? "已并入其他记忆" : detail.status === "archived" ? "已归档" : "参与检索"}
           </span>
           <p className="full-content">{detail.content}</p>
+          {detail.merged_into && (
+            <p className="merge-direction">
+              合并去向：{mergeDestination ? mergeDestination.content.slice(0, 40) : detail.merged_into}
+            </p>
+          )}
           <dl className="details">
             <dt>被找到次数</dt>
             <dd>{detail.retrieval_count}（不等于会话数）</dd>
@@ -694,20 +728,37 @@ export function Memories({
             <div className="similar-block">
               <h4>相似记忆（已自动关联，检索时只返回一条代表）</h4>
               <ul>
-                {similar.map((item) => (
-                  <li key={item.id}>
-                    <span className="tag">{types[item.type]}</span>
-                    <span className="similar-text">{item.content}</span>
-                    <span className="similar-score">
-                      {(item.similarity * 100).toFixed(0)}%
-                    </span>
-                  </li>
-                ))}
+                {similar.map((item) => {
+                  const relation = similarRelation(item);
+                  return (
+                    <li key={item.id}>
+                      <span className="tag">{types[item.type]}</span>
+                      <span className="similar-text">{item.content}</span>
+                      <span
+                        className={
+                          "status-bubble similar-state " +
+                          (relation.includes("不参与")
+                            ? item.memory_status === "archived"
+                              ? "archived"
+                              : "merged"
+                            : "active")
+                        }
+                      >
+                        {relation}
+                      </span>
+                      <span className="similar-score">
+                        {item.similarity >= 0.999
+                          ? "内容相同"
+                          : (item.similarity * 100).toFixed(0) + "%"}
+                      </span>
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           )}
           <details open>
-            <summary>来源记录</summary>
+            <summary>调用来源记录</summary>
             <SourceList
               sources={(detail.sources || detail.provenance || []) as SourceRef[]}
             />
@@ -730,7 +781,7 @@ export function Memories({
               </button>
             ) : detail.merged_into ? (
               <span className="muted">
-                已被合并进其他记忆，无法单独恢复；如需还原，请在「最近合并批次」整批撤销。
+                该记忆已并入其他记忆，无法单独恢复；如需还原，请在「最近合并批次」整批撤销（已固定定档的批次不能撤销）。
               </span>
             ) : (
               <button

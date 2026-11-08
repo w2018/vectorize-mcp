@@ -761,7 +761,7 @@ export class MemoryService implements McpService<Context> {
       pairs: { a: string; b: string; similarity: number; aText: string; bText: string }[];
     }>("similarity-candidates", "similarityCandidates", subjectId);
     const accepted: { a: string; b: string; similarity: number }[] = [];
-    const batchSize = 10;
+    const batchSize = 8;
     for (let i = 0; i < candidates.pairs.length; i += batchSize) {
       const batch = candidates.pairs.slice(i, i + batchSize);
       const listing = batch
@@ -886,7 +886,7 @@ export class MemoryService implements McpService<Context> {
           truncated: boolean;
           pairs: { a: string; b: string; similarity: number; aText: string; bText: string }[];
         }>("similarity-candidates", "similarityCandidates", subjectId);
-        const batchSize = 10;
+        const batchSize = 8;
         const total = Math.max(1, Math.ceil(candidates.pairs.length / batchSize));
         await this.database.write("jobs", "updateMaintenanceJob", jobId, {
           status: "running",
@@ -1304,6 +1304,9 @@ export class MemoryService implements McpService<Context> {
   }
   async undoMergeBatch(subjectId: string, batchId: string, groupIds?: string[]) {
     return this.database.write("undo", "undoMergeBatch", subjectId, batchId, groupIds);
+  }
+  async finalizeMergeBatch(subjectId: string, batchId: string) {
+    return this.database.write("batches", "finalizeMergeBatch", subjectId, batchId);
   }
   async getMergeBatch(subjectId: string, batchId: string) {
     return this.database.read("batches", "getMergeBatch", subjectId, batchId);

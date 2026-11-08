@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS similarity_group_members(group_id TEXT NOT NULL REFER
 CREATE INDEX IF NOT EXISTS similarity_group_member_memory ON similarity_group_members(memory_id);
 CREATE TABLE IF NOT EXISTS maintenance_jobs(id TEXT PRIMARY KEY,subject_id TEXT NOT NULL REFERENCES subjects(id),kind TEXT NOT NULL CHECK(kind IN ('rebuild_groups','merge_groups')),status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','done','failed','cancelled','interrupted')),total INTEGER NOT NULL DEFAULT 0,done INTEGER NOT NULL DEFAULT 0,options TEXT NOT NULL DEFAULT '{}',result TEXT NOT NULL DEFAULT '{}',error TEXT NOT NULL DEFAULT '',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS maintenance_job_scope ON maintenance_jobs(subject_id,status);
-CREATE TABLE IF NOT EXISTS merge_batches(id TEXT PRIMARY KEY,subject_id TEXT NOT NULL REFERENCES subjects(id),job_id TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'done' CHECK(status IN ('done','undone')),groups INTEGER NOT NULL,detail TEXT NOT NULL DEFAULT '[]',created_at INTEGER NOT NULL,undone_at INTEGER);
+CREATE TABLE IF NOT EXISTS merge_batches(id TEXT PRIMARY KEY,subject_id TEXT NOT NULL REFERENCES subjects(id),job_id TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'done' CHECK(status IN ('done','undone')),groups INTEGER NOT NULL,detail TEXT NOT NULL DEFAULT '[]',created_at INTEGER NOT NULL,undone_at INTEGER,finalized_at INTEGER);
 CREATE TRIGGER IF NOT EXISTS links_scope_insert BEFORE INSERT ON links BEGIN
  SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM memories a JOIN memories b ON a.subject_id=b.subject_id WHERE a.id=NEW.source_id AND b.id=NEW.target_id AND a.subject_id=NEW.subject_id) THEN RAISE(ABORT,'SCOPE_VIOLATION') END;
 END;

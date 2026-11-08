@@ -207,6 +207,12 @@ export class Store {
       ) as unknown as { name: string }[];
       if (!tokenColumns.some((column) => column.name === "secret_enc"))
         this.db.exec("ALTER TABLE tokens ADD COLUMN secret_enc TEXT");
+      // v0.6.6：合并批次支持「固定定档」；旧库就地补列，不重建表。
+      const batchColumns = this.rows(
+        "PRAGMA table_info(merge_batches)",
+      ) as unknown as { name: string }[];
+      if (!batchColumns.some((column) => column.name === "finalized_at"))
+        this.db.exec("ALTER TABLE merge_batches ADD COLUMN finalized_at INTEGER");
       this.db
         .prepare("INSERT OR IGNORE INTO metadata VALUES (?,?)")
         .run("schema_version", "3");
@@ -2804,12 +2810,12 @@ export class Store {
       const group = { members: [{ id: pair.a, score: pair.score }, { id: pair.b, score: pair.score }] };
       assigned.add(pair.a);
       assigned.add(pair.b);
-      // 以组内任意成员为锚点继续吸收未占用的相似记忆（最多 5 条）。
+      // 以组内任意成员为锚点继续吸收未占用的相似记忆（最多 8 条；超过 8 条拆成多个组）。
       let grew = true;
-      while (grew && group.members.length < 5) {
+      while (grew && group.members.length < 8) {
         grew = false;
         for (const candidate of usable) {
-          if (group.members.length >= 5) break;
+          if (group.members.length >= 8) break;
           const memberIds = new Set(group.members.map((m) => m.id));
           const inside = memberIds.has(candidate.a) ? candidate.b : memberIds.has(candidate.b) ? candidate.a : "";
           if (!inside || assigned.has(inside)) continue;
@@ -2989,6 +2995,7 @@ export class Store {
       subjectId,
     ) as (MergeBatch & { detail: unknown }) | undefined;
     check(batch, "NOT_FOUND");
+    check(!batch.finalized_at, "BATCH_FINALIZED", "该批次已固定定档，不能撤销。");
     const batchDetail = (typeof batch.detail === "string"
       ? JSON.parse(batch.detail)
       : batch.detail) as {
@@ -3107,10 +3114,27 @@ export class Store {
     }
     return { ...row, detail } as unknown as MergeBatch;
   }
+  /** 固定定档：标记批次永久不可撤销；记录保留用于审计，但不再出现在最近批次列表。 */
+  finalizeMergeBatch(subjectId: string, batchId: string): { id: string; finalized_at: number } {
+    this.adminFor(subjectId);
+    const batch = this.row(
+      "SELECT id,status,finalized_at FROM merge_batches WHERE id=? AND subject_id=?",
+      batchId,
+      subjectId,
+    ) as { id: string; status: string; finalized_at: number | null } | undefined;
+    check(batch, "NOT_FOUND");
+    check(batch.status === "done", "BATCH_STATUS");
+    check(!batch.finalized_at, "BATCH_FINALIZED", "该批次已固定定档，不能重复操作。");
+    const finalizedAt = Date.now();
+    this.db
+      .prepare("UPDATE merge_batches SET finalized_at=? WHERE id=? AND subject_id=?")
+      .run(finalizedAt, batchId, subjectId);
+    return { id: batchId, finalized_at: finalizedAt };
+  }
   listMergeBatches(subjectId: string, limit = 20): { items: MergeBatch[] } {
     this.adminFor(subjectId);
     const rows = this.rows(
-      "SELECT * FROM merge_batches WHERE subject_id=? ORDER BY created_at DESC LIMIT ?",
+      "SELECT * FROM merge_batches WHERE subject_id=? AND finalized_at IS NULL ORDER BY created_at DESC LIMIT ?",
       subjectId,
       Math.max(1, Math.min(100, limit)),
     ) as unknown as (Omit<MergeBatch, "detail"> & { detail: string })[];
@@ -3229,10 +3253,23 @@ export class Store {
       detail,
       created_at: Date.now(),
       undone_at: null,
+      finalized_at: null,
     };
     this.db
-      .prepare("INSERT INTO merge_batches VALUES (?,?,?,?,?,?,?,?)")
-      .run(batch.id, subjectId, jobId, batch.status, batch.groups, JSON.stringify(detail), batch.created_at, null);
+      .prepare(
+        "INSERT INTO merge_batches(id,subject_id,job_id,status,groups,detail,created_at,undone_at,finalized_at) VALUES (?,?,?,?,?,?,?,?,?)",
+      )
+      .run(
+        batch.id,
+        subjectId,
+        jobId,
+        batch.status,
+        batch.groups,
+        JSON.stringify(detail),
+        batch.created_at,
+        null,
+        null,
+      );
     return batch;
   }
   /** 读取某条记忆的相似关系（供 Web 详情展示），按相似度降序，最多 20 条。 */
@@ -3252,6 +3289,8 @@ export class Store {
       importance: number;
       similarity: number;
       status: string;
+      memory_status: string;
+      merged_into: string | null;
     }[] = [];
     for (const row of rows) {
       const other =
@@ -3259,7 +3298,7 @@ export class Store {
           ? String(row.target_id)
           : String(row.source_id);
       const memory = this.row(
-        "SELECT id,json_extract(data,'$.content') AS content,json_extract(data,'$.type') AS type,json_extract(data,'$.importance') AS importance FROM memories WHERE id=? AND subject_id=?",
+        "SELECT id,status AS memory_status,json_extract(data,'$.content') AS content,json_extract(data,'$.type') AS type,json_extract(data,'$.importance') AS importance,json_extract(data,'$.merged_into') AS merged_into FROM memories WHERE id=? AND subject_id=?",
         other,
         subjectId,
       );
@@ -3271,6 +3310,8 @@ export class Store {
         importance: Number(memory.importance),
         similarity: Number(row.similarity),
         status: String(row.status),
+        memory_status: String(memory.memory_status),
+        merged_into: memory.merged_into ? String(memory.merged_into) : null,
       });
     }
     return out;

@@ -1507,7 +1507,10 @@ td button {
 .similar-block ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
 .similar-block li{display:flex;align-items:center;gap:8px;font-size:13px}
 .similar-block .similar-text{flex:1;color:#d7e3e8;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.similar-block .similar-score{color:#66e6d0;font-variant-numeric:tabular-nums}
+.similar-block .similar-score{color:#66e6d0;font-variant-numeric:tabular-nums;white-space:nowrap}
+.similar-block li{flex-wrap:wrap}
+.similar-block .similar-state{margin-left:0;white-space:nowrap}
+.merge-direction{margin:8px 0 4px;font-size:13px;line-height:1.6;color:#9fb3bd;word-break:break-all}
 
 .source-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
 .source-list li{display:flex;flex-wrap:wrap;gap:8px;padding:8px 10px;border:1px solid #2a3b45;border-radius:8px;background:rgba(102,230,208,.04)}

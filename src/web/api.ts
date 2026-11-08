@@ -304,6 +304,7 @@ export interface MergeBatch {
   detail: MergeBatchDetail[];
   created_at: number;
   undone_at: number | null;
+  finalized_at: number | null;
 }
 export interface MergeDraft {
   group_id: string;

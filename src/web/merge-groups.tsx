@@ -8,6 +8,7 @@ import {
   type MergeJobResult,
   type SimilarityGroup,
 } from "./api";
+import { ConfirmDialog } from "./ui";
 
 const RISK_LABEL: Record<string, string> = {
   LOW_SCORE: "低分",
@@ -61,6 +62,8 @@ export function MergeGroupsPanel({
   const [thresholdText, setThresholdText] = useState("0.85");
   const [batches, setBatches] = useState<MergeBatch[]>([]);
   const [batchView, setBatchView] = useState<MergeBatch | null>(null);
+  const [finalizeTarget, setFinalizeTarget] = useState<MergeBatch | null>(null);
+  const [finalizeCode, setFinalizeCode] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -245,6 +248,24 @@ export function MergeGroupsPanel({
     }
   };
 
+  const previewFinalize = async (batch: MergeBatch) => {
+    setBusy("finalize");
+    setError("");
+    try {
+      const preview = await api<{ code: string; expires_at: number }>(
+        "/maintenance/batches/" + encodeURIComponent(batch.id) + "/finalize-preview",
+        "POST",
+        writeBody({ subject_id: subject }),
+      );
+      setFinalizeCode(preview.code);
+      setFinalizeTarget(batch);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "定档预览失败");
+    } finally {
+      setBusy("");
+    }
+  };
+
   const undo = async (batchId: string, groupIds?: string[]) => {
     const tip = groupIds && groupIds.length
       ? "确认撤销这一组合并？该组来源记忆会恢复为可用状态。"
@@ -380,7 +401,6 @@ export function MergeGroupsPanel({
             onBlur={() => setThresholdText(String(threshold))}
             disabled={!!running}
           />
-          <span className="field-hint">重建后生效</span>
         </label>
         <button disabled={!!running || busy !== ""} onClick={rebuild}>
           {busy === "rebuild" ? "创建任务" : "重建分组"}
@@ -472,9 +492,10 @@ export function MergeGroupsPanel({
                 {new Date(Number(batch.created_at)).toLocaleString()} · {batch.groups} 组 · {batch.status}
               </span>
               <button className="link" onClick={() => viewBatch(batch.id)}>查看合并前后对比</button>
-              {batch.status === "done" && (
+              {batch.status === "done" && !batch.finalized_at && <>
+                <button className="link" disabled={busy !== ""} onClick={() => previewFinalize(batch)}>固定定档</button>
                 <button className="link" disabled={busy !== ""} onClick={() => undo(batch.id)}>撤销整批</button>
-              )}
+              </>}
             </div>
           ))}
         </div>
@@ -534,7 +555,7 @@ export function MergeGroupsPanel({
                 </p>
               </div>
               <span className={"batch-status " + batchView.status}>
-                {batchView.status === "done" ? "已完成" : "已撤销"}
+                {batchView.finalized_at ? "已定档" : batchView.status === "done" ? "已完成" : "已撤销"}
               </span>
             </div>
             {batchView.detail.length === 0 ? (
@@ -580,7 +601,7 @@ export function MergeGroupsPanel({
                       </div>
                     </div>
                   </div>
-                  <div className="compare-card-actions">
+                  {!batchView.finalized_at && <div className="compare-card-actions">
                     <button
                       className="link"
                       disabled={busy !== ""}
@@ -588,16 +609,46 @@ export function MergeGroupsPanel({
                     >
                       撤销这一组
                     </button>
-                  </div>
+                  </div>}
                 </div>
               ))
             )}
             <div className="maintenance-row merge-compare-foot">
-              <button disabled={busy !== ""} onClick={() => undo(batchView.id)}>撤销整批</button>
+              {batchView.finalized_at ? (
+                <p className="muted">该批次已固定定档，不能撤销。</p>
+              ) : (
+                <button disabled={busy !== ""} onClick={() => undo(batchView.id)}>撤销整批</button>
+              )}
               <button disabled={busy !== ""} onClick={() => setBatchView(null)}>关闭</button>
             </div>
           </div>
         </div>
+      )}
+      {finalizeTarget && (
+        <ConfirmDialog
+          title="确认固定定档"
+          confirmLabel="确认固定定档"
+          verificationCode={finalizeCode}
+          onClose={() => {
+            setFinalizeTarget(null);
+            setFinalizeCode("");
+          }}
+          onConfirm={async (code) => {
+            if (!code) throw new Error("请输入六位确认码。");
+            await api(
+              "/maintenance/batches/" +
+                encodeURIComponent(finalizeTarget.id) +
+                "/finalize",
+              "POST",
+              writeBody({ subject_id: subject, code }),
+            );
+            await load();
+            onChanged();
+          }}
+        >
+          <p>固定定档后，本批次及其各组将永久不能撤销，也不再显示在最近合并批次列表中。</p>
+          <p>此操作不可恢复，请确认你已核对合并结果。</p>
+        </ConfirmDialog>
       )}
     </section>
   );

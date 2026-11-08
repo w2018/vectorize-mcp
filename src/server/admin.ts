@@ -188,6 +188,7 @@ export async function registerAdmin(
       getActiveJob(subjectId: string): Promise<unknown>;
       cancelJob(jobId: string): Promise<unknown>;
       undoBatch(subjectId: string, batchId: string, groupIds?: string[]): Promise<unknown>;
+      finalizeBatch(subjectId: string, batchId: string): Promise<unknown>;
       getBatch(subjectId: string, batchId: string): Promise<unknown>;
       listBatches(subjectId: string, limit?: number): Promise<unknown>;
       compactPreview(subjectId: string): Promise<unknown>;
@@ -751,6 +752,10 @@ export async function registerAdmin(
     if (!m) throw new DomainError("FEATURE_DISABLED");
     return m.cancelJob(param(req));
   });
+  const batchFinalizations = new Map<
+    string,
+    { code: string; session: string; expires: number; attempts: number }
+  >();
   route("GET", "/maintenance/batches", async (req) => {
     const m = options.maintenance;
     if (!m) throw new DomainError("FEATURE_DISABLED");
@@ -773,6 +778,54 @@ export async function registerAdmin(
       ? b.group_ids.filter((id: unknown): id is string => typeof id === "string")
       : undefined;
     return m.undoBatch(subject(b), text(b.batch_id), ids);
+  });
+  route("POST", "/maintenance/batches/:id/finalize-preview", async (req) => {
+    const m = options.maintenance;
+    if (!m) throw new DomainError("FEATURE_DISABLED");
+    const b = body(req);
+    const subjectId = subject(b);
+    const batchId = param(req);
+    const batch = (await m.getBatch(subjectId, batchId)) as {
+      finalized_at?: number | null;
+    } | null;
+    if (!batch) throw new DomainError("NOT_FOUND", "合并批次不存在。");
+    if (batch.finalized_at)
+      throw new DomainError("BATCH_FINALIZED", "该批次已固定定档，不能重复操作。");
+    const code = String(randomInt(0, 1000000)).padStart(6, "0");
+    const expires = Date.now() + 300000;
+    batchFinalizations.set(subjectId + "\u0000" + batchId, {
+      code,
+      session: current(req)!.id,
+      expires,
+      attempts: 0,
+    });
+    return { batch_id: batchId, code, expires_at: expires };
+  });
+  route("POST", "/maintenance/batches/:id/finalize", async (req) => {
+    const m = options.maintenance;
+    if (!m) throw new DomainError("FEATURE_DISABLED");
+    const b = body(req);
+    const subjectId = subject(b);
+    const batchId = param(req);
+    const key = subjectId + "\u0000" + batchId;
+    const entry = batchFinalizations.get(key);
+    if (
+      !entry ||
+      entry.session !== current(req)!.id ||
+      entry.expires < Date.now() ||
+      entry.attempts >= 5
+    ) {
+      batchFinalizations.delete(key);
+      throw new DomainError("PREVIEW_EXPIRED", "验证码已失效，请重新获取");
+    }
+    entry.attempts++;
+    const given = Buffer.from(text(b.code));
+    const expected = Buffer.from(entry.code);
+    if (given.length !== expected.length || !timingSafeEqual(given, expected))
+      throw new DomainError("FORBIDDEN", "验证码不正确");
+    const result = await m.finalizeBatch(subjectId, batchId);
+    batchFinalizations.delete(key);
+    return result;
   });
   route("POST", "/maintenance/compact/preview", async (req) => {
     const m = options.maintenance;

@@ -414,6 +414,8 @@ export interface MergeBatch {
   detail: unknown[];
   created_at: number;
   undone_at: number | null;
+  /** 固定定档时间；非空表示该批次永久不可撤销，并从最近批次列表隐藏。 */
+  finalized_at: number | null;
 }
 
 export class DomainError extends Error {

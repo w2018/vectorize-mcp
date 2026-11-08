@@ -246,6 +246,8 @@ export async function buildApp(options: AppOptions) {
         cancelJob: (jobId) => service.cancelMaintenanceJob(jobId),
         undoBatch: (subjectId, batchId, groupIds) =>
           service.undoMergeBatch(subjectId, batchId, groupIds),
+        finalizeBatch: (subjectId, batchId) =>
+          service.finalizeMergeBatch(subjectId, batchId),
         getBatch: (subjectId, batchId) => service.getMergeBatch(subjectId, batchId),
         listBatches: (subjectId, limit) => service.listMergeBatches(subjectId, limit),
         compactPreview: (subjectId) => service.compactPreview(subjectId),
