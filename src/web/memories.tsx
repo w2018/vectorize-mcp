@@ -536,9 +536,9 @@ export function Memories({
               setCursor("");
             }}
           >
-            <option value="active">已激活记忆</option>
-            <option value="archived">已归档</option>
-            <option value="merged">已合并</option>
+            <option value="active">已激活（参与检索）</option>
+            <option value="archived">已归档（不参与检索）</option>
+            <option value="merged">已合并来源（不参与检索）</option>
           </select>
         </div>
         <State
@@ -552,6 +552,21 @@ export function Memories({
                 <div className="memory-main">
                   <div className="memory-meta">
                     <span className={"tag " + m.type}>{types[m.type]}</span>
+                    <span
+                      className={
+                        "status-bubble " +
+                        (m.merged_into ? "merged" : m.status === "archived" ? "archived" : "active")
+                      }
+                      title={
+                        m.merged_into
+                          ? "已合并进其他记忆，作为来源保留，不参与检索"
+                          : m.status === "archived"
+                            ? "已归档，不参与检索"
+                            : "已激活，参与检索"
+                      }
+                    >
+                      {m.merged_into ? "已合并来源" : m.status === "archived" ? "已归档" : "参与检索"}
+                    </span>
                     {m.profile && (
                       <span
                         className={
@@ -587,12 +602,18 @@ export function Memories({
                   <div className="row-actions">
                     <button onClick={() => setEditing(m)}>编辑</button>
                     {m.status === "archived" ? (
-                      <button
-                        disabled={action.busy || !!m.merged_into}
-                        onClick={() => setRestoreMemory(m)}
-                      >
-                        取消归档
-                      </button>
+                      m.merged_into ? (
+                        <span className="muted" title="已合并进其他记忆，只能从合并批次整批撤销">
+                          已合并，不可单独恢复
+                        </span>
+                      ) : (
+                        <button
+                          disabled={action.busy}
+                          onClick={() => setRestoreMemory(m)}
+                        >
+                          取消归档
+                        </button>
+                      )
                     ) : (
                       <button
                         disabled={action.busy}
@@ -646,6 +667,14 @@ export function Memories({
           onClose={() => setDetail(null)}
         >
           <span className="tag">{types[detail.type]}</span>
+          <span
+            className={
+              "status-bubble " +
+              (detail.merged_into ? "merged" : detail.status === "archived" ? "archived" : "active")
+            }
+          >
+            {detail.merged_into ? "已合并来源" : detail.status === "archived" ? "已归档" : "参与检索"}
+          </span>
           <p className="full-content">{detail.content}</p>
           <dl className="details">
             <dt>被找到次数</dt>
@@ -699,9 +728,13 @@ export function Memories({
               >
                 归档
               </button>
+            ) : detail.merged_into ? (
+              <span className="muted">
+                已被合并进其他记忆，无法单独恢复；如需还原，请在「最近合并批次」整批撤销。
+              </span>
             ) : (
               <button
-                disabled={action.busy || !!detail.merged_into}
+                disabled={action.busy}
                 onClick={() => {
                   setRestoreMemory(detail);
                   setDetail(null);

@@ -281,7 +281,7 @@ export function About() {
               )
             }
           >
-            覆盖程序文件（先备份）
+            覆盖程序文件
           </button>
           <button
             disabled={busy}

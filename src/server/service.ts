@@ -608,17 +608,23 @@ export class MemoryService implements McpService<Context> {
     const model = (config?.llmModel ?? "").trim() || (this.env.EMBEDDING_MODEL ?? "");
     return { enabled: Boolean(baseUrl && model), baseUrl, model };
   }
-  private chatModel(baseUrl: string, model: string, apiKey?: string, timeoutMs?: number): ChatModel {
+  private chatModel(
+    baseUrl: string,
+    model: string,
+    apiKey?: string,
+    timeoutMs?: number,
+    reasoningEffort: "low" | "high" | "none" = "low",
+  ): ChatModel {
     return new ChatModel({
       baseUrl,
       model,
       apiKey: apiKey?.trim() || this.apiKey() || undefined,
       timeoutMs: timeoutMs ?? Number(this.env.EMBEDDING_TIMEOUT_MS ?? 60000),
-      // Hy 系列是推理模型：默认 high 会把 2048 token 全花在思考上，content 为空且经常超过 30s。
-      reasoningEffort: /(^|[/])hy\d/i.test(model) ? "low" : undefined,
+      // 模型不固定：默认一律低推理，优先保证快速返回；具体模型不支持时由其忽略该参数。
+      reasoningEffort,
     });
   }
-  /** 设置页「测试连接」：用草稿配置真实发一条 chat，验证地址、模型名与密钥。 */
+  /** 设置页「测试连接」：不只测连通，还真实跑一次迷你合并，提前暴露 JSON/推理预算问题。 */
   async testModel(input: {
     baseUrl: string;
     model: string;
@@ -626,11 +632,42 @@ export class MemoryService implements McpService<Context> {
   }): Promise<{ ok: boolean; model: string; elapsed_ms: number; error?: string }> {
     const started = Date.now();
     try {
-      const model = this.chatModel(input.baseUrl, input.model, input.apiKey);
-      const reply = await model.chat(
-        [{ role: "user", content: "请只回复两个字：正常" }],
-        256,
-      );
+      const prompt =
+        "把两条记忆合并为一条，只输出 JSON：{\"title\":\"\",\"content\":\"\",\"type\":\"lesson\",\"keywords\":[\"\"],\"importance\":1到99,\"reason\":\"\"}。\n" +
+        "1. 配置热更新踩坑：忽略超时，后来增加幂等键（记录3870）。\n" +
+        "2. 配置热更新踩坑：忽略超时，后来增加幂等键（记录3791）。";
+      let reply = "";
+      let lastError: unknown;
+      const deadline = Date.now() + 30000;
+      for (const maxTokens of [1024, 2048, 4096]) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 1000) break;
+        const model = this.chatModel(input.baseUrl, input.model, input.apiKey, remaining, "low");
+        try {
+          reply = await model.chat(
+            [
+              { role: "system", content: "你是严谨的记忆库整理助手，只输出 JSON。" },
+              { role: "user", content: prompt },
+            ],
+            maxTokens,
+          );
+          break;
+        } catch (error) {
+          lastError = error;
+          if (!this.isMergeRetryable(error)) throw error;
+        }
+      }
+      if (!reply) throw lastError ?? new Error("模型没有返回内容");
+      const first = reply.indexOf("{");
+      const last = reply.lastIndexOf("}");
+      let parsed: { content?: unknown } = {};
+      try {
+        parsed = JSON.parse(reply.slice(first, last + 1)) as { content?: unknown };
+      } catch {
+        throw new Error("模型可连通，但没有返回合并所需的 JSON。");
+      }
+      if (typeof parsed.content !== "string" || !parsed.content.trim())
+        throw new Error("模型可连通，但合并结果没有正文。");
       return {
         ok: true,
         model: input.model,
@@ -982,7 +1019,7 @@ export class MemoryService implements McpService<Context> {
     try {
       // 必须留出余量小于 Fastify connectionTimeout(60s)，否则连接先被关闭、前端只会收到网络错误。
       // 推理模型需要预留 2048 tokens 让思考过程结束并输出 JSON。
-      return await this.buildMergeDraft(subjectId, group, 45000, 2048);
+      return await this.buildMergeDraft(subjectId, group, 45000);
     } catch (error) {
       // 预览是交互动作，不能让用户在 30s 网关超时后只看到报错：
       // 模型失败/超时时先给出一份可编辑的本地草稿，真正合并仍走后台模型任务。
@@ -1011,11 +1048,11 @@ export class MemoryService implements McpService<Context> {
         (reason ? "（" + reason + "）" : ""),
     };
   }
+  /** 模型不固定：默认低推理，失败时自动提高输出上限并重试，避免推理模型把预算全花在思考上。 */
   private async buildMergeDraft(
     subjectId: string,
     group: SimilarityGroup,
     timeoutMs?: number,
-    maxTokens = 2048,
   ): Promise<{
     group_id: string;
     title?: string;
@@ -1033,7 +1070,6 @@ export class MemoryService implements McpService<Context> {
       );
     const members = group.members ?? [];
     if (members.length < 2) throw new DomainError("GROUP_TOO_SMALL");
-    const model = this.chatModel(config.baseUrl, config.model, undefined, timeoutMs);
     const listing = members
       .map(
         (m, index) =>
@@ -1049,19 +1085,63 @@ export class MemoryService implements McpService<Context> {
           String(m.content ?? "").slice(0, 500),
       )
       .join("\n");
-    const prompt =
-      "下面是同一账户下被判定为高度相似的一组记忆。请把它们压缩合并成一条更精炼、信息完整的记忆。" +
-      "只能使用给出的记忆内容，不要编造新事实；如果不同记忆之间存在矛盾（如不同数字、日期），请在 reason 中说明并保留更可信的一条。" +
-      "只输出 JSON，不要解释，格式：{\"title\":\"\",\"content\":\"\",\"type\":\"\",\"keywords\":[\"\"],\"importance\":1到99,\"reason\":\"\"}。" +
-      "type 必须与组内类型一致。\n" +
-      listing;
-    const reply = await model.chat(
-      [
-        { role: "system", content: "你是严谨的记忆库整理助手，只输出 JSON。" },
-        { role: "user", content: prompt },
-      ],
-      maxTokens,
+    const typeList = [...new Set(members.map((m) => m.type).filter(Boolean))].join("、") || "fact";
+    const prompt = [
+      "任务：把下面同一组高度相似的记忆，压缩成一条可独立阅读、信息不丢失的记忆。",
+      "合并规则：",
+      "1) 只使用组内原文事实，不编造、不补充原文没有的信息；",
+      "2) 删除重复表述，保留最完整、最具体的版本；合并后的正文不要出现“记录1/记录2”或原文编号；",
+      "3) 数字、日期、结论冲突时，保留更具体、附带条件或更新的一条，并在 reason 里写明取舍；不要同时罗列互相冲突的版本；",
+      "4) type 只能是 fact/preference/project/lesson，且与组内主类型一致。",
+      "输出要求：只输出一个 JSON 对象，首字符必须是 {，末字符必须是 }；不要 Markdown 代码块、不要解释。",
+      "字段：{\"title\":\"不超过30字\",\"content\":\"不超过300字\",\"type\":\"fact|preference|project|lesson\",\"keywords\":[\"最多8个\"],\"importance\":1到99,\"reason\":\"不超过100字\"}。",
+      "组内类型：" + typeList,
+      "记忆列表：",
+      listing,
+    ].join("\n");
+    const deadline = Date.now() + (timeoutMs ?? 60000);
+    const plan = this.mergeTokenPlan(members.length);
+    let lastError: unknown;
+    for (const maxTokens of plan) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 1000) break;
+      const model = this.chatModel(config.baseUrl, config.model, undefined, remaining, "low");
+      try {
+        const reply = await model.chat(
+          [
+            { role: "system", content: "你是严谨的记忆库整理助手，只输出 JSON。" },
+            { role: "user", content: prompt },
+          ],
+          maxTokens,
+        );
+        return this.parseMergeReply(reply, group);
+      } catch (error) {
+        lastError = error;
+        if (!this.isMergeRetryable(error)) throw error;
+      }
+    }
+    void subjectId;
+    const detail = lastError instanceof Error ? lastError.message : "模型没有返回可用内容";
+    throw new DomainError("MODEL_INVALID", "模型多次尝试仍失败：" + detail.slice(0, 300));
+  }
+  /** 输出预算随组内记忆条数增长；失败后翻倍，最高 8192。 */
+  private mergeTokenPlan(memberCount: number): number[] {
+    const base = Math.min(4096, Math.max(2048, memberCount * 1024));
+    const plan: number[] = [];
+    for (const candidate of [base, base * 2, 8192]) {
+      const value = Math.min(8192, candidate);
+      if (!plan.includes(value)) plan.push(value);
+    }
+    return plan;
+  }
+  private isMergeRetryable(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /HTTP 502|empty reply|spent on reasoning|finish_reason=length|模型没有返回内容|没有返回合法 JSON|JSON 无法解析|没有返回合并后的正文|请求超时|timeout|aborted|ECONNRESET/i.test(
+      message,
     );
+  }
+  private parseMergeReply(reply: string, group: SimilarityGroup) {
+    const members = group.members ?? [];
     const first = reply.indexOf("{");
     const last = reply.lastIndexOf("}");
     if (first < 0 || last <= first) throw new DomainError("MODEL_INVALID", "模型没有返回合法 JSON。");
@@ -1084,18 +1164,17 @@ export class MemoryService implements McpService<Context> {
     if (!["fact", "preference", "project", "lesson"].includes(type))
       throw new DomainError("MODEL_INVALID", "模型返回的类型不在允许合并的范围内。");
     const keywords = Array.isArray(parsed.keywords)
-      ? parsed.keywords.filter((k): k is string => typeof k === "string").slice(0, 12)
+      ? parsed.keywords.filter((k): k is string => typeof k === "string").slice(0, 8)
       : [];
     const importance = Number(parsed.importance);
-    void subjectId;
     return {
       group_id: group.id,
-      title: typeof parsed.title === "string" ? parsed.title.slice(0, 200) : undefined,
+      title: typeof parsed.title === "string" ? parsed.title.slice(0, 30) : undefined,
       content,
       type,
       keywords,
       importance: Number.isFinite(importance) ? Math.max(1, Math.min(99, importance)) : undefined,
-      reason: typeof parsed.reason === "string" ? parsed.reason.slice(0, 500) : "",
+      reason: typeof parsed.reason === "string" ? parsed.reason.slice(0, 100) : "",
     };
   }
   async startMergeGroupsJob(

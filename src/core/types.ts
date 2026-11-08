@@ -111,6 +111,8 @@ export interface MergeInput extends Request {
   final_content: string;
   reason: string;
   source?: Source;
+  /** 仅供相似分组内部合并：允许最终正文与组内某条来源完全相同，仍把它们归档。 */
+  allow_source_duplicates?: boolean;
 }
 export interface LinkInput extends Request {
   action: "upsert" | "remove";

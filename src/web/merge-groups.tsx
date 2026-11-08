@@ -5,6 +5,7 @@ import {
   type MaintenanceJob,
   type MergeBatch,
   type MergeDraft,
+  type MergeJobResult,
   type SimilarityGroup,
 } from "./api";
 
@@ -14,6 +15,27 @@ const RISK_LABEL: Record<string, string> = {
   TYPE_MIXED: "类型混杂",
   PROTECTED: "受保护类型",
 };
+
+function skipReasonLabel(reason: string): string {
+  if (/HTTP 502|empty reply|spent on reasoning/i.test(reason)) return "模型服务 502";
+  if (/JSON|没有返回合法|没有返回合并后的正文/i.test(reason)) return "模型输出格式异常";
+  if (/STALE|REVISION|状态已变化/i.test(reason)) return "分组已变化";
+  if (/CANONICAL_TARGET_REQUIRED|DUPLICATE_CONTENT/i.test(reason)) return "目标记忆冲突";
+  if (/timeout|超时|aborted/i.test(reason)) return "模型响应超时";
+  return reason || "未知原因";
+}
+
+function summarizeSkipped(skipped: { group_id: string; reason: string }[]): string {
+  const counts = new Map<string, number>();
+  for (const item of skipped) {
+    const label = skipReasonLabel(item.reason);
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([label, count]) => label + " " + count + " 组")
+    .join("、");
+}
 
 /** 记忆整理页：相似分组 -> 人工勾选 -> 模型压缩去重合并（全后台任务 + 进度轮询）。 */
 export function MergeGroupsPanel({
@@ -82,11 +104,21 @@ export function MergeGroupsPanel({
           if (next.status === "done") {
             void load();
             onChanged();
-            const result = next.result as { merged?: number; groups?: number; batch_id?: string };
+            const result = next.result as MergeJobResult;
             if (next.kind === "merge_groups") {
-              setNotice("合并完成：" + String(result.merged ?? 0) + " 组，可查看合并前后对比。");
+              const merged = Number(result.merged ?? 0);
+              const skipped = result.skipped ?? [];
+              if (skipped.length === 0) {
+                setNotice("合并完成：成功 " + merged + " 组，可查看合并前后对比。");
+                setSelected(new Set());
+              } else {
+                setNotice(
+                  "合并完成：成功 " + merged + " 组，跳过 " + skipped.length + " 组（" +
+                    summarizeSkipped(skipped) + "）。已保留失败组的勾选，可再次合并重试。",
+                );
+                setSelected(new Set(skipped.map((item) => item.group_id)));
+              }
               if (result.batch_id) void viewBatch(String(result.batch_id));
-              setSelected(new Set());
             } else {
               setNotice("重建完成：生成 " + String(result.groups ?? 0) + " 个分组。");
             }
@@ -275,11 +307,17 @@ export function MergeGroupsPanel({
       : basis === "llm"
         ? "模型判定与建组"
         : "词法召回与建组";
-  // 高置信=最低相似度达到阈值且不低于 0.9。数字冲突无法在相似度上体现，
-  // 因此不排除选组，但在真正合并前会二次确认并明确告知会保留更可信的一条、可在 7 天内撤销。
-  const confidenceFloor = Math.max(threshold, 0.9);
+  // 高置信固定按最低分 ≥ 0.90 计算；建组阈值只影响「重建分组」，不重复参与选组。
+  const confidenceFloor = 0.9;
   const confidence = groups.filter((g) => g.min_score >= confidenceFloor);
   const conflictCount = confidence.filter((g) => g.risk.split(",").includes("NUMBER_CONFLICT")).length;
+  const allHighSelected = confidence.length > 0 && confidence.every((g) => selected.has(g.id));
+  const toggleHighConfidence = () => {
+    const next = new Set(selected);
+    if (allHighSelected) for (const group of confidence) next.delete(group.id);
+    else for (const group of confidence) next.add(group.id);
+    setSelected(next);
+  };
   const requestMerge = (ids: string[]) => {
     const conflicts = groups.filter((g) => ids.includes(g.id) && g.risk.split(",").includes("NUMBER_CONFLICT")).length;
     if (conflicts > 0) {
@@ -318,8 +356,8 @@ export function MergeGroupsPanel({
             <option value="lexical">词法（按字面，快）</option>
           </select>
         </label>
-        <label className="inline-field">
-          合并阈值
+        <label className="inline-field" title="修改后需点击「重建分组」才会重新分组">
+          建组阈值
           <input
             type="number"
             min={0.3}
@@ -342,6 +380,7 @@ export function MergeGroupsPanel({
             onBlur={() => setThresholdText(String(threshold))}
             disabled={!!running}
           />
+          <span className="field-hint">重建后生效</span>
         </label>
         <button disabled={!!running || busy !== ""} onClick={rebuild}>
           {busy === "rebuild" ? "创建任务" : "重建分组"}
@@ -354,9 +393,10 @@ export function MergeGroupsPanel({
         </button>
         <button
           disabled={!!running || busy !== "" || confidence.length === 0}
-          onClick={() => setSelected(new Set(confidence.map((g) => g.id)))}
+          aria-pressed={allHighSelected}
+          onClick={toggleHighConfidence}
         >
-          选中高置信组（{confidence.length}）
+          {allHighSelected ? "取消选中高置信组" : "选中高置信组"}（{confidence.length}）
         </button>
         {running && (
           <span className="muted">
@@ -374,7 +414,7 @@ export function MergeGroupsPanel({
       {error && <div className="notice warning">{error}</div>}
       {notice && <div className="notice">{notice}</div>}
       <div className="muted">
-        共 {total} 个分组；当前阈值下可一键选中 {confidence.length} 个高置信组
+        共 {total} 个分组；最低分 ≥ 0.90 的高置信组 {confidence.length} 个
         {conflictCount > 0 ? "（其中 " + conflictCount + " 个含数字冲突，合并前会再次确认）" : ""}
       </div>
       {loading ? (
@@ -399,7 +439,7 @@ export function MergeGroupsPanel({
                     }}
                   />
                   <span>
-                    {group.member_count} 条 · 最低分 {group.min_score.toFixed(3)} · {group.basis === "llm" ? "模型" : "词法"}
+                    {group.member_count} 条 · 最低分 {group.min_score.toFixed(2)} · {group.basis === "llm" ? "模型" : "词法"}
                   </span>
                   {group.risk.split(",").filter(Boolean).map((risk) => (
                     <span className="tag warning" key={risk}>{RISK_LABEL[risk] ?? risk}</span>
@@ -409,7 +449,7 @@ export function MergeGroupsPanel({
                   {(group.members ?? []).map((m) => (
                     <li key={m.memory_id}>
                       <strong>{m.title || "未命名"}</strong>
-                      <span className="muted">（{m.type} · {m.score.toFixed(3)}）</span>
+                      <span className="muted">（{m.type} · {m.score.toFixed(2)}）</span>
                       <p>{String(m.content ?? "").slice(0, 160)}</p>
                     </li>
                   ))}
@@ -458,7 +498,7 @@ export function MergeGroupsPanel({
                 {(previewGroup?.members ?? []).map((m) => (
                   <div className="compare-item" key={m.memory_id}>
                     <strong>{m.title || "未命名"}</strong>
-                    <span className="muted">（{m.type} · {m.score.toFixed(3)}）</span>
+                    <span className="muted">（{m.type} · {m.score.toFixed(2)}）</span>
                     <p>{String(m.content ?? "")}</p>
                   </div>
                 ))}
@@ -521,7 +561,7 @@ export function MergeGroupsPanel({
                               <strong>{m.title || "未命名"}</strong>
                               <span className="tag">{m.type || "未分类"}</span>
                               <span className="muted">
-                                {m.score > 0 ? "相似度 " + m.score.toFixed(3) : "旧批次无相似度"}
+                                {m.score > 0 ? "相似度 " + m.score.toFixed(2) : "旧批次无相似度"}
                               </span>
                             </div>
                             <p>{m.content}</p>

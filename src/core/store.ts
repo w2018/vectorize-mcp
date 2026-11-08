@@ -2265,12 +2265,13 @@ export class Store {
         input.final_content,
         target.id,
       );
-      if (duplicate)
-        throw new DomainError(
-          sources.some((s) => s.id === duplicate.id)
-            ? "CANONICAL_TARGET_REQUIRED"
-            : "DUPLICATE_CONTENT",
-        );
+      if (duplicate) {
+        const duplicateIsSource = sources.some((s) => s.id === duplicate.id);
+        if (!(duplicateIsSource && input.allow_source_duplicates))
+          throw new DomainError(
+            duplicateIsSource ? "CANONICAL_TARGET_REQUIRED" : "DUPLICATE_CONTENT",
+          );
+      }
       const count = items.reduce((n, m) => n + BigInt(m.retrieval_count), 0n);
       check(count <= 9223372036854775807n);
       target.content = input.final_content;
@@ -2948,8 +2949,12 @@ export class Store {
     );
     check(token === group.state_token, "STALE_GROUP");
     const ordered = [...(group.members ?? [])].sort((a, b) => b.score - a.score);
-    const target = ordered[0]!;
-    const sources = ordered.slice(1);
+    // 最终正文若与组内某条原文完全一致，就把那条原文当作合并目标，避免 CANONICAL_TARGET_REQUIRED。
+    const canonical = ordered.find(
+      (m) => normalize(String(m.content ?? "")) === normalize(finalContent),
+    );
+    const target = canonical ?? ordered[0]!;
+    const sources = ordered.filter((m) => m.memory_id !== target.memory_id);
     check(sources.length >= 1, "GROUP_TOO_SMALL");
     const result = this.merge(ctx, {
       request_id: randomUUID(),
@@ -2958,6 +2963,7 @@ export class Store {
       final_content: finalContent,
       reason: "模型压缩去重合并",
       source: { platform: "memory-consolidation" },
+      allow_source_duplicates: true,
     } as MergeInput);
     const data = result.data as { target_id: string; revision: number; archived_ids: string[] };
     this.db

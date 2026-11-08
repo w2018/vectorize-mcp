@@ -4,8 +4,8 @@ export interface ChatModelOptions {
   model: string;
   apiKey?: string;
   timeoutMs?: number;
-  /** 推理型模型可降档，避免思考 token 吃满上限后 content 为空或请求超时。 */
-  reasoningEffort?: "low" | "high";
+  /** 推理型模型可降档（none 表示完全不传 reasoning_effort），避免思考 token 吃满上限。 */
+  reasoningEffort?: "low" | "high" | "none";
 }
 
 export interface ChatMessage {
@@ -43,7 +43,7 @@ export class ChatModel {
           messages,
           temperature: 0,
           max_tokens: maxTokens,
-          ...(this.options.reasoningEffort
+          ...(this.options.reasoningEffort && this.options.reasoningEffort !== "none"
             ? { reasoning_effort: this.options.reasoningEffort }
             : {}),
         }),

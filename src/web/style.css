@@ -1938,3 +1938,33 @@ html[data-mobile="true"] .compare-card-actions { justify-content: stretch; }
 html[data-mobile="true"] .compare-card-actions button { width: 100%; padding: 10px; }
 html[data-mobile="true"] .merge-compare-foot { border-top: 0; padding-top: 0; }
 html[data-mobile="true"] .modal.merge-compare { padding: 14px; }
+
+/* v0.6.5：表单提示与记忆状态气泡 */
+.field-hint {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 12px;
+  font-weight: 400;
+  color: #6a7c73;
+}
+.status-bubble {
+  display: inline-block;
+  border-radius: 20px;
+  padding: 2px 8px;
+  margin-left: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  vertical-align: middle;
+}
+.status-bubble.active {
+  background: #e3f5e8;
+  color: #1f6b3c;
+}
+.status-bubble.archived {
+  background: #eceeed;
+  color: #55635c;
+}
+.status-bubble.merged {
+  background: #fff0d6;
+  color: #8a570f;
+}

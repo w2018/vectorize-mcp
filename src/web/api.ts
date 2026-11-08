@@ -281,6 +281,12 @@ export interface MaintenanceJob {
   result: Record<string, unknown>;
   error: string;
 }
+export interface MergeJobResult {
+  merged?: number;
+  groups?: number;
+  batch_id?: string;
+  skipped?: { group_id: string; reason: string }[];
+}
 export interface MergeBatchDetail {
   group_id: string;
   target_id: string;
