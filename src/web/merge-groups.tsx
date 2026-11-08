@@ -326,10 +326,10 @@ export function MergeGroupsPanel({
     : job.kind === "merge_groups"
       ? "合并"
       : basis === "llm"
-        ? "模型判定与建组"
+        ? "模型判定批次"
         : "词法召回与建组";
-  // 高置信固定按最低分 ≥ 0.90 计算；建组阈值只影响「重建分组」，不重复参与选组。
-  const confidenceFloor = 0.9;
+  // 高置信统一使用「建组阈值」，避免页面出现两个不同的分数口径。
+  const confidenceFloor = threshold;
   const confidence = groups.filter((g) => g.min_score >= confidenceFloor);
   const conflictCount = confidence.filter((g) => g.risk.split(",").includes("NUMBER_CONFLICT")).length;
   const allHighSelected = confidence.length > 0 && confidence.every((g) => selected.has(g.id));
@@ -420,7 +420,8 @@ export function MergeGroupsPanel({
         </button>
         {running && (
           <span className="muted">
-            {stage}：{job!.done}/{job!.total}（{pct}%）
+            {stage}：{job!.done}/{job!.total}
+            {stage === "模型判定批次" ? " 批" : stage === "合并" ? " 组" : ""}（{pct}%）
             <button className="link" onClick={() => api("/maintenance/jobs/" + job!.id + "/cancel", "POST", writeBody({}))}>取消</button>
           </span>
         )}
@@ -434,7 +435,7 @@ export function MergeGroupsPanel({
       {error && <div className="notice warning">{error}</div>}
       {notice && <div className="notice">{notice}</div>}
       <div className="muted">
-        共 {total} 个分组；最低分 ≥ 0.90 的高置信组 {confidence.length} 个
+        共 {total} 个分组；最低分 ≥ {threshold.toFixed(2)} 的高置信组 {confidence.length} 个
         {conflictCount > 0 ? "（其中 " + conflictCount + " 个含数字冲突，合并前会再次确认）" : ""}
       </div>
       {loading ? (

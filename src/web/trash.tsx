@@ -28,6 +28,7 @@ export function Trash({ refresh }: { refresh: number }) {
     [cursor, setCursor] = useState(""),
     [selected, setSelected] = useState<string[]>([]),
     [target, setTarget] = useState(""),
+    [restoreIds, setRestoreIds] = useState<string[] | null>(null),
     [detailId, setDetailId] = useState<string | null>(null),
     [compat, setCompat] = useState<TrashCompat | null>(null),
     [deleting, setDeleting] = useState<string[] | null>(null);
@@ -46,6 +47,9 @@ export function Trash({ refresh }: { refresh: number }) {
     setVersion((v) => v + 1);
     dataChanged();
   };
+  function beginRestore(ids: string[]) {
+    setRestoreIds(ids);
+  }
   async function check(ids: string[]) {
     if (!target) {
       action.setError("请先选择恢复到的目标账户。");
@@ -102,24 +106,9 @@ export function Trash({ refresh }: { refresh: number }) {
               </option>
             ))}
           </select>
-          <select
-            aria-label="恢复目标账户"
-            value={target}
-            onChange={(e) => {
-              setTarget(e.target.value);
-              setCompat(null);
-            }}
-          >
-            <option value="">选择目标账户</option>
-            {accounts.data?.items.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name}
-              </option>
-            ))}
-          </select>
           <button
-            disabled={action.busy || !selected.length || !target}
-            onClick={() => void check(selected)}
+            disabled={action.busy || !selected.length}
+            onClick={() => beginRestore([...selected])}
           >
             批量恢复检查（{selected.length}）
           </button>
@@ -206,9 +195,9 @@ export function Trash({ refresh }: { refresh: number }) {
                       <div className="toolbar">
                         <button
                           disabled={
-                            action.busy || !target || i.state !== "committed"
+                            action.busy || i.state !== "committed"
                           }
-                          onClick={() => void check([i.id])}
+                          onClick={() => beginRestore([i.id])}
                         >
                           恢复检查
                         </button>
@@ -266,6 +255,44 @@ export function Trash({ refresh }: { refresh: number }) {
               </>
             )}
           </State>
+        </Modal>
+      )}
+      {restoreIds && (
+        <Modal
+          title="选择恢复目标账户"
+          onClose={() => setRestoreIds(null)}
+        >
+          <p className="muted">
+            将恢复 {restoreIds.length} 条快照到下面的账户，先做兼容检查，确认后再执行。
+          </p>
+          <select
+            aria-label="恢复目标账户"
+            value={target}
+            onChange={(e) => {
+              setTarget(e.target.value);
+              setCompat(null);
+            }}
+          >
+            <option value="">请选择目标账户</option>
+            {accounts.data?.items.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}
+              </option>
+            ))}
+          </select>
+          <div className="toolbar" style={{ marginTop: 12 }}>
+            <button onClick={() => setRestoreIds(null)}>取消</button>
+            <button
+              disabled={!target || action.busy}
+              onClick={() => {
+                const ids = restoreIds!;
+                setRestoreIds(null);
+                void check(ids);
+              }}
+            >
+              兼容检查
+            </button>
+          </div>
         </Modal>
       )}
       {compat && (
