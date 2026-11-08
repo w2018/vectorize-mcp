@@ -65,9 +65,18 @@ export class TrashVault {
   remove(id: string) {
     this.db.prepare("DELETE FROM trash WHERE id=?").run(id);
   }
-  list(filters: { kind?: string; offset?: number; limit?: number } = {}) {
-    const where = filters.kind ? " WHERE kind=?" : "";
-    const args = filters.kind ? [filters.kind] : [];
+  list(filters: { kind?: string; subjectId?: string; offset?: number; limit?: number } = {}) {
+    const clauses: string[] = [];
+    const args: unknown[] = [];
+    if (filters.kind) {
+      clauses.push("kind=?");
+      args.push(filters.kind);
+    }
+    if (filters.subjectId) {
+      clauses.push("source_subject_id=?");
+      args.push(filters.subjectId);
+    }
+    const where = clauses.length ? " WHERE " + clauses.join(" AND ") : "";
     const total = Number(
       (this.db.prepare("SELECT count(*) n FROM trash" + where).get(...args) as { n: number }).n,
     );
@@ -120,9 +129,9 @@ export class TrashVault {
       if (row.state === "pending") {
         if (exists) this.remove(String(row.id));
         else this.markCommitted(String(row.id));
-      } else if (row.kind === "memory" && exists) {
-        // A committed snapshot whose memory exists again was restored but its
-        // cleanup was interrupted; drop the stale snapshot.
+      } else if (exists) {
+        // P2-16: a committed snapshot whose source row exists again was restored
+        // (or its cleanup was interrupted). Drop it for every kind, including tokens.
         this.remove(String(row.id));
       }
     }

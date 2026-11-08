@@ -3,7 +3,9 @@ CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS subjects(id TEXT PRIMARY KEY,label TEXT NOT NULL,access_state TEXT NOT NULL DEFAULT 'unbound',auth_epoch INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,kind TEXT NOT NULL DEFAULT 'standard' CHECK(kind IN ('standard','qqbot')));
 CREATE TABLE IF NOT EXISTS tokens(id TEXT PRIMARY KEY,subject_id TEXT NOT NULL REFERENCES subjects(id),label TEXT NOT NULL,digest TEXT NOT NULL UNIQUE,status TEXT NOT NULL,revision INTEGER NOT NULL,created_at INTEGER NOT NULL,revoked_at INTEGER);
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_token ON tokens(subject_id) WHERE status='active';
-CREATE TABLE IF NOT EXISTS memories(id TEXT PRIMARY KEY,subject_id TEXT NOT NULL REFERENCES subjects(id),content_hash TEXT NOT NULL,revision INTEGER NOT NULL,status TEXT NOT NULL,merged_into TEXT REFERENCES memories(id),data TEXT NOT NULL,UNIQUE(subject_id,content_hash));
+CREATE TABLE IF NOT EXISTS memories(id TEXT PRIMARY KEY,subject_id TEXT NOT NULL REFERENCES subjects(id),content_hash TEXT NOT NULL,revision INTEGER NOT NULL,status TEXT NOT NULL,merged_into TEXT REFERENCES memories(id),data TEXT NOT NULL,retrieval_count INTEGER NOT NULL DEFAULT 0,last_retrieved_at INTEGER);
+-- P2-10: only active memories are content-unique; archived duplicates may coexist.
+CREATE UNIQUE INDEX IF NOT EXISTS memories_active_content ON memories(subject_id,content_hash) WHERE status='active';
 CREATE TABLE IF NOT EXISTS bot_profiles(subject_id TEXT PRIMARY KEY REFERENCES subjects(id),revision INTEGER NOT NULL,preset_id TEXT,persona_memory_id TEXT REFERENCES memories(id) ON DELETE SET NULL,data TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
 CREATE TRIGGER IF NOT EXISTS bot_persona_insert BEFORE INSERT ON bot_profiles WHEN NEW.persona_memory_id IS NOT NULL BEGIN
  SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM memories WHERE id=NEW.persona_memory_id AND subject_id=NEW.subject_id AND status='active' AND json_extract(data,'$.type')='persona') THEN RAISE(ABORT,'PERSONA_REFERENCE_INVALID') END;

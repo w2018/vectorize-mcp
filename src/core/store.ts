@@ -193,6 +193,51 @@ export class Store {
     }
     if (!options.readonly) {
       this.db.exec(schema);
+      // P2-10: older databases carry a table-level UNIQUE(subject_id,content_hash)
+      // that also covers archived rows. Rebuild once so only active rows are unique.
+      const memoriesSql = this.row(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'",
+      )?.sql;
+      if (
+        typeof memoriesSql === "string" &&
+        /UNIQUE\s*\(\s*subject_id\s*,\s*content_hash\s*\)/i.test(memoriesSql)
+      ) {
+        this.db.pragma("foreign_keys = OFF");
+        try {
+          // Triggers on other tables reference memories; drop every trigger here
+          // and recreate the whole trigger set from schema after the rebuild.
+          const triggers = this.rows(
+            "SELECT name FROM sqlite_master WHERE type='trigger'",
+          );
+          for (const t of triggers)
+            this.db.exec(`DROP TRIGGER IF EXISTS "${String(t.name)}"`);
+          this.db.exec(
+            "BEGIN;" +
+              "CREATE TABLE memories_new(id TEXT PRIMARY KEY,subject_id TEXT NOT NULL REFERENCES subjects(id),content_hash TEXT NOT NULL,revision INTEGER NOT NULL,status TEXT NOT NULL,merged_into TEXT REFERENCES memories(id),data TEXT NOT NULL);" +
+              "INSERT INTO memories_new SELECT id,subject_id,content_hash,revision,status,merged_into,data FROM memories;" +
+              "DROP TABLE memories;" +
+              "ALTER TABLE memories_new RENAME TO memories;" +
+              "COMMIT;",
+          );
+        } catch (error) {
+          this.db.exec("ROLLBACK");
+          throw error;
+        } finally {
+          this.db.pragma("foreign_keys = ON");
+        }
+        this.db.exec(schema);
+      }
+      // P2-14: retrieval counters live in their own columns, not in the versioned data JSON.
+      const memoryColumns = this.rows("PRAGMA table_info(memories)").map(
+        (c) => String(c.name),
+      );
+      if (!memoryColumns.includes("retrieval_count")) {
+        this.db.exec("ALTER TABLE memories ADD COLUMN retrieval_count INTEGER NOT NULL DEFAULT 0");
+        this.db.exec("ALTER TABLE memories ADD COLUMN last_retrieved_at INTEGER");
+        this.db.exec(
+          "UPDATE memories SET retrieval_count=COALESCE(json_extract(data,'$.retrieval_count'),0), last_retrieved_at=json_extract(data,'$.last_retrieved_at')",
+        );
+      }
       // v0.6.1：相似关系新增「通用模型判断」依据。旧库的 CHECK 约束只允许
       // lexical/semantic/hybrid，需就地重建表（行数据原样保留），否则写入 basis=llm 会失败。
       const similarSql = this.row(
@@ -1088,7 +1133,7 @@ export class Store {
       token: metadata,
     };
   }
-  listTrash(filters: { kind?: string; offset?: number; limit?: number } = {}) {
+  listTrash(filters: { kind?: string; subjectId?: string; offset?: number; limit?: number } = {}) {
     check(!filters.kind || ["memory", "token"].includes(filters.kind));
     return this.trashVault().list(filters);
   }
@@ -1433,7 +1478,7 @@ export class Store {
         ),
     );
     const batchMemoryIds = new Map<string, string>();
-    const batchContent = new Map<string, string>();
+    const batchContent = new Map<string, { id: string; status: string }>();
     const items: RestoreCheck[] = details.map((detail, index) => {
       const id = ids[index]!;
       if (!detail)
@@ -1512,8 +1557,9 @@ export class Store {
               message: "目标账户已存在同 ID 记忆",
             });
           if (
+            memory.status === "active" &&
             this.row(
-              "SELECT id FROM memories WHERE subject_id=? AND content_hash=?",
+              "SELECT id FROM memories WHERE subject_id=? AND content_hash=? AND status='active'",
               targetSubjectId,
               hash(normalize(memory.content)),
             )
@@ -1526,13 +1572,20 @@ export class Store {
           {
             const contentKey = hash(normalize(memory.content));
             const prior = batchContent.get(contentKey);
-            if (prior && prior !== id)
+            // P2-10: archived rows may share content; only two active rows collide.
+            if (
+              prior &&
+              prior.id !== id &&
+              prior.status === "active" &&
+              memory.status === "active"
+            )
               issues.push({
                 level: "red",
                 code: "BATCH_DUPLICATE_CONTENT",
                 message: "本批次包含多条相同内容，不能一起恢复",
               });
-            else batchContent.set(contentKey, id);
+            else if (!prior || (prior.status !== "active" && memory.status === "active"))
+              batchContent.set(contentKey, { id, status: memory.status });
           }
           if (memory.merged_into)
             issues.push({
@@ -1757,21 +1810,31 @@ export class Store {
   }
   private load(ctx: Context, id: string): Memory {
     const r = this.row(
-      "SELECT data FROM memories WHERE subject_id=? AND id=?",
+      "SELECT data,retrieval_count,last_retrieved_at FROM memories WHERE subject_id=? AND id=?",
       ctx.subjectId,
       id,
     );
     check(r, "NOT_FOUND");
     const m = JSON.parse(String(r!.data)) as Memory;
+    m.retrieval_count = String(r!.retrieval_count ?? "0");
+    m.last_retrieved_at =
+      r!.last_retrieved_at === null || r!.last_retrieved_at === undefined
+        ? null
+        : Number(r!.last_retrieved_at);
     m.weight = weight(m, this.getConfig());
     return m;
   }
   private all(subjectId: string): Memory[] {
     return this.rows(
-      "SELECT data FROM memories WHERE subject_id=?",
+      "SELECT data,retrieval_count,last_retrieved_at FROM memories WHERE subject_id=?",
       subjectId,
     ).map((r) => {
       const m = JSON.parse(String(r.data)) as Memory;
+      m.retrieval_count = String(r.retrieval_count ?? "0");
+      m.last_retrieved_at =
+        r.last_retrieved_at === null || r.last_retrieved_at === undefined
+          ? null
+          : Number(r.last_retrieved_at);
       m.weight = weight(m, this.getConfig());
       return m;
     });
@@ -1780,7 +1843,7 @@ export class Store {
     this.validateFields(m, m.subject_id);
     this.db
       .prepare(
-        "INSERT INTO memories VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET content_hash=excluded.content_hash,revision=excluded.revision,status=excluded.status,merged_into=excluded.merged_into,data=excluded.data",
+        "INSERT INTO memories(id,subject_id,content_hash,revision,status,merged_into,data,retrieval_count,last_retrieved_at) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET content_hash=excluded.content_hash,revision=excluded.revision,status=excluded.status,merged_into=excluded.merged_into,data=excluded.data,retrieval_count=excluded.retrieval_count,last_retrieved_at=excluded.last_retrieved_at",
       )
       .run(
         m.id,
@@ -1790,6 +1853,8 @@ export class Store {
         m.status,
         m.merged_into,
         JSON.stringify(m),
+        String(m.retrieval_count ?? "0"),
+        m.last_retrieved_at ?? null,
       );
     if (version)
       this.db
@@ -1888,9 +1953,11 @@ export class Store {
     ctx: Context,
     content: string,
     exclude?: string,
+    activeOnly = false,
   ) {
     const r = this.row(
-      "SELECT id,data FROM memories WHERE subject_id=? AND content_hash=?",
+      "SELECT id,data FROM memories WHERE subject_id=? AND content_hash=?" +
+        (activeOnly ? " AND status='active'" : ""),
       ctx.subjectId,
       hash(normalize(content)),
     );
@@ -2081,7 +2148,7 @@ export class Store {
       if (!ctx.admin && this.protected(m))
         check(this.protected(next), "PROTECTED_MEMORY");
       check(
-        !this.duplicate(ctx, next.content, m.id),
+        !this.duplicate(ctx, next.content, m.id, true),
         "DUPLICATE_CONTENT",
       );
       next.content_hash = hash(normalize(next.content));
@@ -2334,7 +2401,7 @@ export class Store {
       });
       let target = items[0]!,
         sources = items.slice(1);
-      const duplicate = this.duplicate(ctx, input.final_content, target.id);
+      const duplicate = this.duplicate(ctx, input.final_content, target.id, true);
       if (duplicate) {
         const duplicateIsSource = sources.some((s) => s.id === duplicate.id);
         if (!(duplicateIsSource && input.allow_source_duplicates))
@@ -3931,7 +3998,17 @@ export class Store {
           check(count <= 9223372036854775807n);
           current.retrieval_count = String(count);
           current.last_retrieved_at = Date.now();
-          this.save(current, false, false);
+          // P2-14: counters are independent columns; this must not bump the content revision.
+          this.db
+            .prepare(
+              "UPDATE memories SET retrieval_count=?,last_retrieved_at=? WHERE subject_id=? AND id=?",
+            )
+            .run(
+              current.retrieval_count,
+              current.last_retrieved_at,
+              current.subject_id,
+              current.id,
+            );
           for (const term of new Set((input.keywords ?? []).map(normalize)))
             this.db
               .prepare(

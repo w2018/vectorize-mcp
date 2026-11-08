@@ -441,8 +441,13 @@ export async function registerAdmin(
     const kind = q.kind === undefined || q.kind === "" ? undefined : text(q.kind);
     if (kind !== undefined && kind !== "memory" && kind !== "token")
       throw new DomainError("VALIDATION_ERROR");
+    const subjectId =
+      q.subject_id === undefined || q.subject_id === ""
+        ? undefined
+        : text(q.subject_id);
     const page = await read<{ items: unknown[]; total: number }>("listTrash", {
       kind,
+      subjectId,
       offset: start,
       limit,
     });
