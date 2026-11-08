@@ -237,7 +237,7 @@ export interface SearchEvaluation {
 }
 export interface SearchData {
   items: ReturnedSearchItem[];
-  mode: "semantic" | "lexical";
+  mode: "semantic" | "lexical" | "mixed";
   estimated_tokens: number;
   estimated: true;
   budget_exhausted: boolean;
@@ -366,7 +366,7 @@ export interface PreparedSearch {
   items: SearchItem[];
   configRevision: number;
   asOf: number;
-  mode: "semantic" | "lexical";
+  mode: "semantic" | "lexical" | "mixed";
   budgetExhausted: boolean;
   estimatedTokens: number;
 }

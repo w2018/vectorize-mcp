@@ -526,13 +526,7 @@ export class MemoryService implements McpService<Context> {
         ctx,
         enriched,
       );
-      if (warning)
-        prepared.warnings = [
-          warning,
-          ...(!input.keywords?.length
-            ? ["KEYWORDS_REQUIRED: provide keywords for lexical fallback."]
-            : []),
-        ];
+      if (warning) prepared.warnings = [warning];
       try {
         return await this.database.write<Envelope<SearchData>>(
           ctx.tokenId,
@@ -1179,8 +1173,10 @@ export class MemoryService implements McpService<Context> {
     } catch {
       throw new DomainError("MODEL_INVALID", "模型返回的 JSON 无法解析。");
     }
-    const content = typeof parsed.content === "string" ? parsed.content.trim() : "";
-    if (!content) throw new DomainError("MODEL_INVALID", "模型没有返回合并后的正文。");
+    const rawContent = typeof parsed.content === "string" ? parsed.content.trim() : "";
+    if (!rawContent) throw new DomainError("MODEL_INVALID", "模型没有返回合并后的正文。");
+    // P2-19: the prompt caps the body at 300 characters; enforce it on parse too.
+    const content = rawContent.slice(0, 300);
     const type = typeof parsed.type === "string" ? parsed.type : (members[0]?.type ?? "fact");
     if (!["fact", "preference", "project", "lesson"].includes(type))
       throw new DomainError("MODEL_INVALID", "模型返回的类型不在允许合并的范围内。");

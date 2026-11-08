@@ -24,6 +24,7 @@ import {
 export function Trash({ refresh }: { refresh: number }) {
   const [version, setVersion] = useState(0),
     [kind, setKind] = useState(""),
+    [source, setSource] = useState(""),
     [cursor, setCursor] = useState(""),
     [selected, setSelected] = useState<string[]>([]),
     [target, setTarget] = useState(""),
@@ -32,7 +33,7 @@ export function Trash({ refresh }: { refresh: number }) {
     [deleting, setDeleting] = useState<string[] | null>(null);
   const action = useAction();
   const items = useResource<Page<TrashItemSummary>>(
-    "/trash" + query({ kind, cursor, limit: 50 }),
+    "/trash" + query({ kind, subject_id: source, cursor, limit: 50 }),
     `${refresh}:${version}`,
   );
   const accounts = useResource<Page<Account>>("/accounts", refresh);
@@ -84,6 +85,22 @@ export function Trash({ refresh }: { refresh: number }) {
             <option value="">全部类型</option>
             <option value="memory">记忆</option>
             <option value="token">凭据</option>
+          </select>
+          <select
+            aria-label="按来源账户筛选"
+            value={source}
+            onChange={(e) => {
+              setSource(e.target.value);
+              setCursor("");
+              setSelected([]);
+            }}
+          >
+            <option value="">全部来源账户</option>
+            {accounts.data?.items.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}
+              </option>
+            ))}
           </select>
           <select
             aria-label="恢复目标账户"

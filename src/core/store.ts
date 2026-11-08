@@ -2050,7 +2050,9 @@ export class Store {
             id: duplicate.id,
             revision: duplicate.revision,
             index_state: duplicate.embedding_state,
-            semantic_check: "unavailable",
+            // P2-20: exact duplicate short-circuits semantic review; say so instead
+            // of pretending the semantic layer was unavailable.
+            semantic_check: "skipped_exact_match",
           },
           ids: [duplicate.id],
         };
@@ -3798,7 +3800,16 @@ export class Store {
       if (dfMap.get(term)! > 0)
         totalWeight += idf.get(term)! * (termWeights.get(term) ?? 1);
     const candidates = candidateMemories;
-    let semantic = false;
+    // P2-24: load all current vectors for this model in one join instead of one
+    // SQL round-trip per candidate during scoring.
+    const vectorIndex = new Map<string, Buffer>();
+    if (input.embedding)
+      for (const row of this.rows(
+        "SELECT v.memory_id,v.vector FROM vectors v JOIN memories m ON m.id=v.memory_id AND m.revision=v.revision WHERE m.subject_id=? AND v.model=?",
+        ctx.subjectId,
+        input.embedding.model,
+      ))
+        vectorIndex.set(String(row.memory_id), row.vector as Buffer);
     const scored: SearchItem[] = [];
     const titleScore = new Map<string, number>();
     const rawScore = new Map<string, number>();
@@ -3833,14 +3844,8 @@ export class Store {
       let relevance = lexical,
         mode: "semantic" | "lexical" = "lexical";
       if (input.embedding) {
-        const v = this.row(
-          "SELECT * FROM vectors WHERE memory_id=? AND revision=? AND model=?",
-          m.id,
-          m.revision,
-          input.embedding.model,
-        );
-        if (v) {
-          const blob = v.vector as Buffer;
+        const blob = vectorIndex.get(m.id);
+        if (blob) {
           if (blob.byteLength === input.embedding.vector.length * 4) {
             const q = input.embedding.vector;
             check(q.every(Number.isFinite) && q.some((x) => x !== 0));
@@ -3855,7 +3860,6 @@ export class Store {
               ? 0.8 * similarity + 0.2 * lexical
               : similarity;
             mode = "semantic";
-            semantic = true;
           }
         }
       }
@@ -3975,7 +3979,13 @@ export class Store {
       rankedIds,
       configRevision: config.revision,
       asOf: now,
-      mode: semantic ? "semantic" : "lexical",
+      // P2-23: report the modes actually returned, not just whether any candidate
+      // had a usable vector. Mixed means semantic and lexical items coexist.
+      mode: (() => {
+        const modes = new Set(items.map((m) => m.scoring_mode));
+        if (modes.has("semantic") && modes.has("lexical")) return "mixed";
+        return modes.has("semantic") ? "semantic" : "lexical";
+      })(),
       budgetExhausted: exhausted,
       estimatedTokens: used,
     };
