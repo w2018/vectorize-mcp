@@ -276,6 +276,9 @@ export class Store {
       ) as unknown as { name: string }[];
       if (!batchColumns.some((column) => column.name === "finalized_at"))
         this.db.exec("ALTER TABLE merge_batches ADD COLUMN finalized_at INTEGER");
+      // v0.8.3：memory_fts 是废弃索引（P2-11 后写入路径不再维护、全库无任何查询），
+      // 旧库保留着历史文档；启动时就地移除，避免死数据与无效写入。
+      this.db.exec("DROP TABLE IF EXISTS memory_fts");
       this.db
         .prepare("INSERT OR IGNORE INTO metadata VALUES (?,?)")
         .run("schema_version", "3");
@@ -1083,7 +1086,6 @@ export class Store {
       this.db.prepare("DELETE FROM maintenance_jobs WHERE subject_id=?").run(subjectId);
       this.db.prepare("DELETE FROM merge_batches WHERE subject_id=?").run(subjectId);
       this.db.prepare("DELETE FROM links WHERE subject_id=?").run(subjectId);
-      this.db.prepare("DELETE FROM memory_fts WHERE subject_id=?").run(subjectId);
       this.db.prepare("DELETE FROM bot_profiles WHERE subject_id=?").run(subjectId);
       this.db.prepare("DELETE FROM tokens WHERE subject_id=?").run(subjectId);
       this.db.prepare("DELETE FROM imports WHERE subject_id=?").run(subjectId);
@@ -1223,7 +1225,6 @@ export class Store {
     this.db
       .prepare(`DELETE FROM links WHERE source_id IN (${marks}) OR target_id IN (${marks})`)
       .run(...unique, ...unique);
-    this.db.prepare(`DELETE FROM memory_fts WHERE id IN (${marks})`).run(...unique);
     this.db.prepare(`DELETE FROM memories WHERE id IN (${marks})`).run(...unique);
   }
   deleteToTrash(
