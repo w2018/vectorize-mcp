@@ -45,6 +45,9 @@ import type {
   ArchiveInput,
   RestoreInput,
   SearchInput,
+  RecallInput,
+  RecallData,
+  RecallItem,
   SimilarityGroup,
   MaintenanceJob,
   MergeBatch,
@@ -2269,6 +2272,229 @@ export class Store {
       estimated: true,
       estimated_tokens: used,
     }));
+  }
+  /** Read-only time-window enumeration ("recall"), complementing relevance search. */
+  recall(ctx: Context, input: RecallInput): Envelope<RecallData> {
+    this.authorize(ctx);
+    const WINDOWS: Record<string, number> = {
+      day: 86_400_000,
+      week: 604_800_000,
+      month: 2_592_000_000,
+      quarter: 7_776_000_000,
+      year: 31_536_000_000,
+    };
+    const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
+    const toMs = (
+      value: number | string | undefined,
+      edge: "start" | "end",
+    ): number | null => {
+      if (value === undefined || value === null) return null;
+      let n: number;
+      const dateOnly = typeof value === "string" ? DATE_ONLY.exec(value.trim()) : null;
+      if (dateOnly) {
+        // A bare date means the whole local day, so "2026-11-05" works as from and to.
+        const year = Number(dateOnly[1]),
+          month = Number(dateOnly[2]),
+          day = Number(dateOnly[3]);
+        const d = new Date(
+          year,
+          month - 1,
+          day,
+          edge === "start" ? 0 : 23,
+          edge === "start" ? 0 : 59,
+          edge === "start" ? 0 : 59,
+          edge === "start" ? 0 : 999,
+        );
+        check(
+          d.getFullYear() === year && d.getMonth() === month - 1 && d.getDate() === day,
+          "VALIDATION_ERROR",
+          "Invalid calendar date in from/to: " + String(value),
+        );
+        n = d.getTime();
+      } else {
+        n = typeof value === "number" ? value : Date.parse(value);
+      }
+      check(
+        Number.isFinite(n) && n >= 0,
+        "VALIDATION_ERROR",
+        "from/to must be epoch milliseconds, an ISO-8601 timestamp, or YYYY-MM-DD.",
+      );
+      return Math.trunc(n);
+    };
+    const timeField = input.time_field ?? "created";
+    const mode = input.mode ?? "digest";
+    const order = input.order ?? "asc";
+    const limit = input.limit ?? 20;
+    const budget = input.token_budget ?? this.getConfig().tokenBudget;
+    check(Number.isInteger(limit) && limit >= 1 && limit <= 50);
+    check(Number.isInteger(budget) && budget >= 128 && budget <= 1200);
+    const cursor = input.cursor ?? 0;
+    check(Number.isInteger(cursor) && cursor >= 0);
+    const span = input.window ? WINDOWS[input.window] : null;
+    if (input.window) check(span !== null && span > 0);
+    let from = toMs(input.from, "start"),
+      to = toMs(input.to, "end");
+    const now = Date.now();
+    if (from === null && to === null) {
+      check(
+        span !== null,
+        "VALIDATION_ERROR",
+        "Pass from, to or window: at least one time anchor is required.",
+      );
+      to = now;
+      from = to - span!;
+    } else if (from === null) {
+      check(
+        span !== null,
+        "VALIDATION_ERROR",
+        "Pass from (or window) when only to is supplied.",
+      );
+      from = to! - span!;
+    } else if (to === null) {
+      check(
+        span !== null,
+        "VALIDATION_ERROR",
+        "Pass to (or window) when only from is supplied.",
+      );
+      to = from + span!;
+    }
+    check(
+      from! <= to!,
+      "VALIDATION_ERROR",
+      "from must be earlier than or equal to to.",
+    );
+    const start = from!,
+      end = to!;
+    const matched: { m: Memory; at: number }[] = [];
+    for (const m of this.all(ctx.subjectId)) {
+      if (!input.include_archived && !this.effective(m, now)) continue;
+      if (!input.include_private && m.sensitivity === "private") continue;
+      if (input.types && input.types.length && !input.types.includes(m.type))
+        continue;
+      if (
+        input.min_importance !== undefined &&
+        m.importance < input.min_importance
+      )
+        continue;
+      const at =
+        timeField === "updated"
+          ? m.updated_at
+          : timeField === "valid_from"
+            ? (m.valid_from ?? m.created_at)
+            : m.created_at;
+      if (at < start || at > end) continue;
+      matched.push({ m, at });
+    }
+    matched.sort((x, y) =>
+      order === "asc"
+        ? x.at - y.at || x.m.id.localeCompare(y.m.id)
+        : y.at - x.at || x.m.id.localeCompare(y.m.id),
+    );
+    const counts: Record<string, number> = {};
+    for (const { m } of matched) counts[m.type] = (counts[m.type] ?? 0) + 1;
+    // Histogram unit adapts to the window; coarse enough to stay small.
+    const totalSpan = end - start;
+    let unit: "hour" | "day" | "week" | "month" =
+      totalSpan <= 2 * 86_400_000
+        ? "hour"
+        : totalSpan <= 62 * 86_400_000
+          ? "day"
+          : totalSpan <= 400 * 86_400_000
+            ? "week"
+            : "month";
+    const STEP: Record<string, number> = {
+      hour: 3_600_000,
+      day: 86_400_000,
+      week: 604_800_000,
+      month: 2_592_000_000,
+    };
+    let step = STEP[unit]!;
+    while (Math.ceil((end - start + 1) / step) > 200 && unit !== "month") {
+      unit = unit === "hour" ? "day" : unit === "day" ? "week" : "month";
+      step = STEP[unit]!;
+    }
+    const bucketCount = Math.max(1, Math.ceil((end - start + 1) / step));
+    const countsByBucket: number[] = new Array(bucketCount).fill(0);
+    for (const { at } of matched) {
+      const i = Math.min(
+        bucketCount - 1,
+        Math.max(0, Math.floor((at - start) / step)),
+      );
+      countsByBucket[i]!++;
+    }
+    const items: RecallItem[] = [];
+    let used = 0,
+      exhausted = false,
+      idx = Math.min(cursor, matched.length);
+    for (; idx < matched.length && items.length < limit; ) {
+      const { m, at } = matched[idx]!;
+      const item: RecallItem =
+        mode === "full"
+          ? {
+              id: m.id,
+              type: m.type,
+              title: m.title,
+              at,
+              importance: m.importance,
+              status: m.status,
+              merged_into: m.merged_into,
+              created_at: m.created_at,
+              updated_at: m.updated_at,
+              revision: m.revision,
+              content: m.content,
+              valid_from: m.valid_from,
+              valid_until: m.valid_until,
+            }
+          : {
+              id: m.id,
+              type: m.type,
+              title: m.title,
+              at,
+              importance: m.importance,
+              status: m.status,
+              merged_into: m.merged_into,
+              created_at: m.created_at,
+              updated_at: m.updated_at,
+              excerpt: [...m.content].slice(0, 160).join(""),
+            };
+      const cost = Buffer.byteLength(JSON.stringify(item));
+      if (used + cost > budget && items.length > 0) {
+        exhausted = true;
+        break;
+      }
+      items.push(item);
+      used += cost;
+      idx++;
+      if (used >= budget) {
+        exhausted = idx < matched.length;
+        break;
+      }
+    }
+    const nextCursor = idx < matched.length ? idx : null;
+    return this.envelope(
+      measured({
+        range: {
+          from: start,
+          to: end,
+          time_field: timeField,
+          window: input.window ?? null,
+        },
+        total_matched: matched.length,
+        returned: items.length,
+        counts_by_type: counts,
+        timeline: {
+          unit,
+          start,
+          step,
+          counts: countsByBucket,
+        },
+        items,
+        next_cursor: nextCursor,
+        estimated: true,
+        estimated_tokens: used,
+        budget_exhausted: exhausted,
+      }),
+    );
   }
   link(ctx: Context, input: LinkInput) {
     return this.mutate(ctx, "memory_link", input, () => {
@@ -5271,6 +5497,8 @@ export class Store {
             args.token_budget as number | undefined,
           ),
         );
+      case "memory_recall":
+        return this.recall(ctx, args as unknown as RecallInput);
       case "memory_config_get":
         this.authorize(ctx);
         return this.envelope({

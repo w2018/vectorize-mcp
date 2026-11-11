@@ -27,7 +27,10 @@ import {
   useAction,
   useResource,
 } from "./ui";
-import { MEMORY_RULES } from "../core/memory-rules";
+import {
+  MEMORY_RULES_VARIANTS,
+  type MemoryRulesVariantId,
+} from "../core/memory-rules";
 type IssuedCredential = {
   id: string;
   label: string;
@@ -114,6 +117,20 @@ export function Accounts({
   const [accessOpen, setAccessOpen] = useState(false);
   const [accessTokenId, setAccessTokenId] = useState<string | null>(null);
   const [accessFormat, setAccessFormat] = useState<McpFormat>("opencode");
+  const [agentsVariant, setAgentsVariant] = useState<MemoryRulesVariantId>(() => {
+    try {
+      const saved = window.localStorage.getItem("vmcp:agents-variant");
+      if (saved === "nano" || saved === "compact" || saved === "standard" || saved === "full")
+        return saved;
+    } catch {
+      /* ignore storage errors */
+    }
+    return "standard";
+  });
+  const agentsRule =
+    MEMORY_RULES_VARIANTS.find((variant) => variant.id === agentsVariant) ??
+    MEMORY_RULES_VARIANTS[2]!;
+  const agentsBytes = new TextEncoder().encode(agentsRule.text).length;
   const [pending, setPending] = useState<Pending | null>(null);
   const [deleting, setDeleting] = useState<Account | null>(null);
   /** D-18: after a failed confirm the preview_token is consumed; re-issue it
@@ -523,10 +540,49 @@ export function Accounts({
               </p>
               <label>
                 AGENTS.md 文案
+                <div
+                  className="agents-variants"
+                  role="radiogroup"
+                  aria-label="AGENTS.md 文案档位"
+                >
+                  {MEMORY_RULES_VARIANTS.map((variant) => (
+                    <button
+                      key={variant.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={variant.id === agentsVariant}
+                      className={
+                        "agents-variant" +
+                        (variant.id === agentsVariant ? " active" : "")
+                      }
+                      title={variant.hint}
+                      onClick={() => {
+                        setAgentsVariant(variant.id);
+                        try {
+                          window.localStorage.setItem(
+                            "vmcp:agents-variant",
+                            variant.id,
+                          );
+                        } catch {
+                          /* ignore storage errors */
+                        }
+                      }}
+                    >
+                      <span className="agents-variant-label">{variant.label}</span>
+                      <span className="agents-variant-hint">
+                        面向场景：{variant.hint}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                <span className="access-hint">
+                  当前：{agentsRule.label} · {[...agentsRule.text].length} 字符 /{" "}
+                  {agentsBytes} 字节
+                </span>
                 <textarea
                   readOnly
-                  rows={10}
-                  value={MEMORY_RULES}
+                  rows={agentsVariant === "nano" ? 6 : 12}
+                  value={agentsRule.text}
                   spellCheck={false}
                 />
               </label>
@@ -535,7 +591,7 @@ export function Accounts({
                   disabled={action.busy}
                   onClick={() =>
                     void action.run(async () => {
-                      await navigator.clipboard.writeText(MEMORY_RULES);
+                      await navigator.clipboard.writeText(agentsRule.text);
                     }, "已复制 AGENTS.md 文案")
                   }
                 >

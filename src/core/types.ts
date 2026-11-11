@@ -154,6 +154,56 @@ export interface SearchInput extends Request {
   /** Evaluation-only ground truth ids; normal callers must omit this. */
   expected_ids?: string[];
 }
+export interface RecallInput extends Request {
+  from?: number | string;
+  to?: number | string;
+  window?: "day" | "week" | "month" | "quarter" | "year";
+  types?: MemoryType[];
+  time_field?: "created" | "updated" | "valid_from";
+  include_archived?: boolean;
+  include_private?: boolean;
+  min_importance?: number;
+  limit?: number;
+  mode?: "digest" | "full";
+  order?: "asc" | "desc";
+  cursor?: number;
+  token_budget?: number;
+}
+export interface RecallItem {
+  id: string;
+  type: MemoryType;
+  title: string;
+  /** Effective timestamp used for ordering and bucketing. */
+  at: number;
+  importance: number;
+  status: "active" | "archived";
+  merged_into: string | null;
+  created_at: number;
+  updated_at: number;
+  excerpt?: string;
+  revision?: number;
+  content?: string;
+  valid_from?: number | null;
+  valid_until?: number | null;
+}
+export interface RecallData {
+  range: { from: number; to: number; time_field: string; window: string | null };
+  total_matched: number;
+  returned: number;
+  counts_by_type: Record<string, number>;
+  /** Compact histogram: counts[i] covers [start + i*step, start + (i+1)*step). */
+  timeline: {
+    unit: "hour" | "day" | "week" | "month";
+    start: number;
+    step: number;
+    counts: number[];
+  };
+  items: RecallItem[];
+  next_cursor: number | null;
+  estimated_tokens: number;
+  estimated: true;
+  budget_exhausted: boolean;
+}
 export interface GetInput {
   ids: string[];
   token_budget?: number;

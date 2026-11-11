@@ -408,7 +408,8 @@ export class MemoryService implements McpService<Context> {
     else if (
       tool === "memory_get" ||
       tool === "memory_config_get" ||
-      tool === "memory_bootstrap"
+      tool === "memory_bootstrap" ||
+      tool === "memory_recall"
     )
       result = await this.database.read(
         ctx.tokenId,

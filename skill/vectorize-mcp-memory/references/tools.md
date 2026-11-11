@@ -1,6 +1,6 @@
 # vectorize-mcp tool argument reference
 
-English, AI-facing. Companion to `SKILL.md`: full argument tables, return structures, boundary values and misuse notes for the 11 `w_memory_*` tools.
+English, AI-facing. Companion to `SKILL.md`: full argument tables, return structures, boundary values and misuse notes for the 12 `w_memory_*` tools.
 
 ## Conventions
 - `request_id`: optional, max 200 chars, any text; the server normalizes it deterministically to a UUID. Reuse the same value only when retrying the identical write; a changed intent needs a new value. Omit in normal use.
@@ -32,6 +32,28 @@ Returns `data`: `items[]` (id, type, title, content, importance, score, ...), `m
 | include_archived | bool | no | default false |
 
 Returns `data.items[]`. Does not increment retrieval counts. Missing or out-of-account ids reveal no existence information. This does not replace semantic search.
+
+## w_memory_recall
+| Field | Type | Required | Constraint |
+|---|---|---|---|
+| request_id | string | no | max 200 |
+| from | int \| string | no | epoch ms, ISO-8601, or `YYYY-MM-DD` (whole-day start); with to/window |
+| to | int \| string | no | epoch ms, ISO-8601, or `YYYY-MM-DD` (whole-day end 23:59:59.999); with from/window |
+| window | enum | no | day \| week \| month \| quarter \| year; derives the missing anchor |
+| types | enum[] | no | 1-10 of the 10 memory types |
+| time_field | enum | no | created (default) \| updated \| valid_from |
+| include_archived | bool | no | default false; true also returns archived/merged items with status |
+| include_private | bool | no | default false; private-sensitivity items are excluded |
+| min_importance | int | no | 1-99 |
+| limit | int | no | 1-50, default 20 |
+| mode | enum | no | digest (default) \| full |
+| order | enum | no | asc (default) \| desc by the chosen time field |
+| cursor | int | no | >= 0, from previous next_cursor |
+| token_budget | int | no | 128-1200, server default 1200 |
+
+Returns `data`: `range{from,to,time_field,window}`, `total_matched`, `returned`, `counts_by_type{}`, `timeline{unit,start,step,counts[]}` (compact histogram; bucket i covers [start+i*step, start+(i+1)*step)), `items[]`, `next_cursor` (null when exhausted), `estimated_tokens`, `budget_exhausted`. `mode=digest` items are `{id,type,title,at,importance,status,merged_into,created_at,updated_at,excerpt}`; `mode=full` items add `revision,content,valid_from,valid_until`. Read-only: it never scores relevance and never increments retrieval counts. Use `w_memory_search` when the topic is known, `w_memory_get` to expand an id.
+
+Phrasings: a bare `YYYY-MM-DD` is expanded to the whole local day, so "what did I do on 2026-11-05" = `{from:"2026-11-05", to:"2026-11-05"}`, and "from 11-01 to 11-05" = `{from:"2026-11-01", to:"2026-11-05"}`. `time_field` decides what the window filters: `created` = when it was remembered (default), `valid_from` = when the fact became true. Use `mode:"digest"` first, then `mode:"full"` or `w_memory_get` for details.
 
 ## w_memory_add
 | Field | Type | Required | Constraint |
@@ -144,6 +166,8 @@ QQBOT accounts only. Returns the bot profile, enabled persona and recalled memor
 | sources (merge) | 1-8 |
 | items (archive) | 1-5 |
 | limit (similarity_groups) | 1-50 |
+| limit (recall) | 1-50 |
+| cursor (recall) | >= 0 |
 | strength / confidence | 0-1 |
 
 Out-of-range arguments return `VALIDATION_ERROR`; MCP layer text looks like `MCP error -32602: Input validation error: ... Too big: expected number to be <=5 at limit`.
@@ -157,5 +181,6 @@ Out-of-range arguments return `VALIDATION_ERROR`; MCP layer text looks like `MCP
 | `archive` skipping preview | Always preview -> `preview_token` -> execute |
 | Treating `needs_review` as success | It was not saved; inspect candidates or resubmit with `distinct_reason` |
 | Looking for `w_memory_delete` | It does not exist; delete = archive |
+| Using `recall` to find a known topic | Use `memory_search`; recall is for unknown intent / time spans |
 | Sending `source.kind` / `source.detail` | Use `{"platform":"..."}` or omit |
 | Reusing `request_id` for a different intent | Generate/omit a new one |

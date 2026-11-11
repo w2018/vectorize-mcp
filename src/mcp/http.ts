@@ -198,6 +198,7 @@ export function createMcpHandler<C>(service: McpService<C>) {
               name === "memory_get" ||
               name === "memory_config_get" ||
               name === "memory_bootstrap" ||
+              name === "memory_recall" ||
               name === "memory_similarity_groups",
             destructiveHint:
               name === "memory_merge" || name === "memory_archive",
